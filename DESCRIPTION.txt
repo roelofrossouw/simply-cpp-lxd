@@ -1,0 +1,1 @@
+LXD's REST API for simply-cpp: a cluster's instances and their state, over TLS with a client certificate
