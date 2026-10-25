@@ -9,7 +9,7 @@ get_sc_version()
 message(STATUS "SimplyCPP ${SC_MODULE} Version: ${SC_VERSION}")
 
 # sc::rest with client certificates, trust() and pinning since 1.22.0 (over libcurl), and nlohmann/json.
-find_or_install_package(sc-core simply-cpp-dev simply-cpp 1.22.0)
+find_or_install_package(sc-core simply-cpp-dev simply-cpp 1.23.0)
 
 set(SOURCE_OBJECTS)
 set(SOURCE_LIBRARIES)

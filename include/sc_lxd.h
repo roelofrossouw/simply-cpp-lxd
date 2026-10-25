@@ -8,12 +8,16 @@
 //                         {.certificate = "agent.crt", .key = "agent.key", .server_certificate = "cluster.crt"}};
 //     for (const auto &each: lxd.instances())
 //         std::cout << each.name << " on " << each.location << ": " << each.status << '\n';
+//     if (const auto hosts = lxd.read_file("web1", "/etc/hosts")) std::cout << hosts->content;
+//     const auto listed = lxd.exec("web1", {"dpkg-query", "-W"});
+//     if (listed.status == 0) std::cout << listed.out;
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -74,6 +78,32 @@ namespace sc::lxd {
         [[nodiscard]] static instance from_json(const nlohmann::json &metadata);
     };
 
+    // A path in an instance, as LXD's file API gives it.
+    struct file {
+        std::string type;                 // "file", "directory" or "symlink"
+        std::string content;              // a file's bytes, a symlink's target
+        std::vector<std::string> entries; // a directory's names
+        int uid = 0;
+        int gid = 0;
+        unsigned mode = 0;                // the permission bits, 0644; 04755 with setuid
+    };
+
+    // What exec() runs a command with.
+    struct exec_options {
+        std::string project = "default";
+        // How long it may take: lxd::error (status 408) when it's still running then.
+        std::chrono::seconds limit{60};
+        // Its environment besides LXD's own (PATH, HOME, ...): {"LANG", "C.UTF-8"}.
+        std::map<std::string, std::string> environment;
+    };
+
+    // How a command ended, and what it wrote.
+    struct exec_result {
+        int status = 0; // its exit status
+        std::string out;
+        std::string err;
+    };
+
     class client {
     public:
         // members: the cluster's member URLs ("https://10.0.100.3:8443"), tried in this order
@@ -91,12 +121,37 @@ namespace sc::lxd {
         // One instance with its state; nothing when there's no such instance.
         [[nodiscard]] std::optional<instance> find(std::string_view name, std::string_view project = "default") const;
 
+        // A file, directory or symlink in an instance (a link itself, not where it points);
+        // nothing when the path isn't there.
+        [[nodiscard]] std::optional<file> read_file(std::string_view instance, std::string_view path,
+                                                    std::string_view project = "default") const;
+
+        // Runs command in a running instance and waits for it to end: argv as is, no shell
+        // unless it's one ({"sh", "-c", "..."}). Its output is recorded by LXD, read, and removed
+        // there. Throws lxd::error when LXD refuses (an instance that isn't running: 400) or the
+        // command outlasts the limit.
+        [[nodiscard]] exec_result exec(std::string_view instance, const std::vector<std::string> &command,
+                                       const exec_options &options = {}) const;
+
         // The URL of the member that answered last (the first before any did).
         [[nodiscard]] std::string member() const;
 
         [[nodiscard]] const std::vector<std::string> &members() const { return members_; }
 
     private:
+        struct response {
+            long status = 0;
+            std::string body;
+            std::map<std::string, std::string> headers;
+        };
+
+        // The first member's answer that is LXD's (its JSON, or with raw a file's bytes), from the
+        // one that answered last; lxd::unreachable when none answers. body: a POST of it.
+        [[nodiscard]] response request(const char *method, std::string_view path, const std::string *body = nullptr,
+                                       bool raw = false, std::chrono::seconds timeout = std::chrono::seconds{0}) const;
+        // The metadata of LXD's JSON answer, or its lxd::error.
+        [[nodiscard]] static nlohmann::json metadata_of(const response &answer);
+
         std::vector<std::string> members_;
         credentials credentials_;
         std::chrono::seconds timeout_;

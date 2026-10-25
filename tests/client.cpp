@@ -67,6 +67,52 @@ int main() {
         }
     }
 
+    SECTION("Files: a file with its owner and mode, a symlink, a directory, nothing for a missing path");
+    {
+        const sc::lxd::client lxd{{dead, live}, known, std::chrono::seconds{2}};
+        const auto hostname = lxd.read_file("web1", "/etc/hostname");
+        CHECK(hostname && hostname->type == "file");
+        CHECK_EQ(hostname->content, std::string{"web1\n"});
+        CHECK_EQ(hostname->mode, 0644u);
+        CHECK_EQ(hostname->uid, 0);
+        const auto sudoers = lxd.read_file("web1", "/etc/sudoers");
+        CHECK(sudoers && sudoers->mode == 0440u);
+        CHECK_EQ(sudoers->content, std::string("root ALL=(ALL) ALL\n\0", 20)); // bytes, a zero among them
+        const auto localtime = lxd.read_file("web1", "/etc/localtime");
+        CHECK(localtime && localtime->type == "symlink");
+        CHECK_EQ(localtime->content, std::string{"/usr/share/zoneinfo/Africa/Johannesburg"});
+        const auto apt = lxd.read_file("web1", "/etc/apt");
+        CHECK(apt && apt->type == "directory" && apt->content.empty());
+        CHECK_EQ(apt->entries.size(), std::size_t{2});
+        CHECK(!lxd.read_file("web1", "/etc/no such file"));
+        CHECK_EQ(lxd.member(), live);
+    }
+
+    SECTION("exec: exit status and output, LXD's recorded output removed; refused; too slow");
+    {
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};
+        const auto ran = lxd.exec("web1", {"sh", "-c", "echo hi"}, {.environment = {{"LANG", "C.UTF-8"}}});
+        CHECK_EQ(ran.status, 0);
+        CHECK_EQ(ran.out, std::string{"sh -c echo hi LANG=C.UTF-8\n"});
+        CHECK_EQ(ran.err, std::string{"warned\n"});
+        CHECK_EQ(lxd.exec("web1", {"fail"}).status, 3);
+        // The stand-in forgets a log once it's deleted: none is left.
+        CHECK_THROWS_AS((void) lxd.get("/1.0/instances/web1/logs/exec-output/none"), sc::lxd::error);
+        try {
+            (void) lxd.exec("web2", {"true"});
+            CHECK_MSG(false, "exec in an instance that isn't running didn't throw");
+        } catch (const sc::lxd::error &refused) {
+            CHECK_EQ(refused.status(), 400);
+        }
+        try {
+            (void) lxd.exec("web1", {"sleep", "100"}, {.limit = std::chrono::seconds{1}});
+            CHECK_MSG(false, "a command past its limit didn't throw");
+        } catch (const sc::lxd::error &slow) {
+            CHECK_EQ(slow.status(), 408);
+        }
+        CHECK_THROWS_AS((void) lxd.exec("web1", {}), std::invalid_argument);
+    }
+
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");
     {
         CHECK_THROWS_AS((void) sc::lxd::client({dead}, known, std::chrono::seconds{2}).instances(), sc::lxd::unreachable);

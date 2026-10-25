@@ -78,46 +78,60 @@ namespace sc::lxd {
             throw std::invalid_argument("sc::lxd::client: a client certificate and its key are needed");
     }
 
-    nlohmann::json client::get(const std::string_view path) const {
+    client::response client::request(const char *method, const std::string_view path, const std::string *body, const bool raw,
+                                     const std::chrono::seconds timeout) const {
         std::size_t first;
         {
             const std::lock_guard lock{mutex_};
             first = answered_;
         }
+        const auto limit = timeout.count() > 0 ? timeout : timeout_;
         std::string reasons;
         for (std::size_t tried = 0; tried < members_.size(); ++tried) {
             const std::size_t index = (first + tried) % members_.size();
-            sc::rest request{members_[index] + std::string{path}};
-            request.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());
-            if (!credentials_.server_certificate.empty()) request.trust(credentials_.server_certificate.string()).verify_host(false);
-            if (!credentials_.pinned_key.empty()) request.pinned_public_key(credentials_.pinned_key);
-            request.connect_timeout(std::min<long>(5, static_cast<long>(timeout_.count())));
-            request.timeout(static_cast<long>(timeout_.count()));
-            const auto body = request.get();
-            const long status = request.status();
+            sc::rest call{members_[index] + std::string{path}};
+            call.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());
+            if (!credentials_.server_certificate.empty()) call.trust(credentials_.server_certificate.string()).verify_host(false);
+            if (!credentials_.pinned_key.empty()) call.pinned_public_key(credentials_.pinned_key);
+            call.connect_timeout(std::min<long>(5, static_cast<long>(timeout_.count())));
+            call.timeout(static_cast<long>(limit.count()));
+            const std::string_view verb{method};
+            auto answer_body = verb == "POST" ? call.post(body ? *body : std::string{"{}"}) : verb == "DELETE" ? call.del() : call.get();
+            const long status = call.status();
             std::string why;
             if (status == 0) {
-                why = request.error();
+                why = call.error();
             } else if (status == 503) {
                 why = "503 (not ready)";
             } else {
-                const auto answer = nlohmann::json::parse(body, nullptr, false);
-                if (answer.is_object() && answer.contains("type")) {
+                // LXD's own answer: its JSON, or (raw) a file's bytes, which come with X-LXD-type.
+                const auto parsed = nlohmann::json::parse(answer_body, nullptr, false);
+                const bool lxds = (parsed.is_object() && parsed.contains("type")) ||
+                                  (raw && (status == 200 || call.response_headers().contains("x-lxd-type")));
+                if (lxds) {
                     {
                         const std::lock_guard lock{mutex_};
                         answered_ = index;
                     }
-                    if (answer["type"] == "error")
-                        throw lxd::error{text_at(answer, "error"), answer.value("error_code", static_cast<int>(status))};
-                    return answer.value("metadata", nlohmann::json{});
+                    return {status, std::move(answer_body), call.response_headers()};
                 }
                 why = "HTTP " + std::to_string(status) + ", not LXD's answer";
             }
             if (!reasons.empty()) reasons += "; ";
             reasons += members_[index] + ": " + why;
         }
-        throw unreachable{"sc::lxd: no member answered GET " + std::string{path} + " (" + reasons + ")"};
+        throw unreachable{"sc::lxd: no member answered " + std::string{method} + " " + std::string{path} + " (" + reasons + ")"};
     }
+
+    nlohmann::json client::metadata_of(const response &answer) {
+        const auto parsed = nlohmann::json::parse(answer.body, nullptr, false);
+        if (!parsed.is_object()) throw lxd::error{"sc::lxd: an answer that isn't JSON", static_cast<int>(answer.status)};
+        if (parsed.value("type", "") == "error")
+            throw lxd::error{text_at(parsed, "error"), parsed.value("error_code", static_cast<int>(answer.status))};
+        return parsed.value("metadata", nlohmann::json{});
+    }
+
+    nlohmann::json client::get(const std::string_view path) const { return metadata_of(request("GET", path)); }
 
     std::vector<instance> client::instances(const bool all_projects) const {
         const auto listed = get(all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2");
@@ -136,6 +150,83 @@ namespace sc::lxd {
             if (refused.status() == 404) return std::nullopt;
             throw;
         }
+    }
+
+    std::optional<file> client::read_file(const std::string_view instance, const std::string_view path, const std::string_view project) const {
+        const auto answer = request("GET", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project),
+                                    nullptr, true);
+        const auto header = [&](const char *name) {
+            const auto found = answer.headers.find(name);
+            return found == answer.headers.end() ? std::string{} : found->second;
+        };
+        const auto type = header("x-lxd-type");
+        if (type.empty()) {
+            try {
+                (void) metadata_of(answer);
+            } catch (const lxd::error &refused) {
+                if (refused.status() == 404) return std::nullopt;
+                throw;
+            }
+            throw lxd::error{"sc::lxd: no file type in the answer for " + std::string{path}, static_cast<int>(answer.status)};
+        }
+        file out;
+        out.type = type;
+        const auto number = [&](const char *name, const int base) {
+            const auto text = header(name);
+            try {
+                return text.empty() ? 0 : std::stoi(text, nullptr, base);
+            } catch (const std::exception &) {
+                return 0;
+            }
+        };
+        out.uid = number("x-lxd-uid", 10);
+        out.gid = number("x-lxd-gid", 10);
+        out.mode = static_cast<unsigned>(number("x-lxd-mode", 8));
+        if (type == "directory") {
+            if (const auto names = metadata_of(answer); names.is_array())
+                for (const auto &name: names)
+                    if (name.is_string()) out.entries.push_back(name.get<std::string>());
+        } else {
+            out.content = answer.body;
+        }
+        return out;
+    }
+
+    exec_result client::exec(const std::string_view instance, const std::vector<std::string> &command, const exec_options &options) const {
+        if (command.empty()) throw std::invalid_argument("sc::lxd::client::exec: no command");
+        nlohmann::json order{{"command", command}, {"wait-for-websocket", false}, {"interactive", false}, {"record-output", true}};
+        order["environment"] = nlohmann::json::object();
+        for (const auto &[name, value]: options.environment) order["environment"][name] = value;
+        const auto body = order.dump();
+        const auto started = metadata_of(request("POST", "/1.0/instances/" + encoded(instance) + "/exec?project=" + encoded(options.project), &body));
+        const auto id = text_at(started, "id");
+        if (id.empty()) throw lxd::error{"sc::lxd: exec started no operation", 0};
+
+        // The wait answers when it ends, or with it still running at the limit.
+        const auto seconds = std::to_string(options.limit.count());
+        const auto ended = metadata_of(request("GET", "/1.0/operations/" + encoded(id) + "/wait?timeout=" + seconds + "&project=" + encoded(options.project),
+                                               nullptr, false, options.limit + timeout_));
+        const auto status = text_at(ended, "status");
+        if (status == "Running") throw lxd::error{"sc::lxd: " + std::string{instance} + ": the command was still running after " + seconds + " s", 408};
+        if (status != "Success") throw lxd::error{"sc::lxd: " + std::string{instance} + ": " + text_at(ended, "err"), 500};
+
+        exec_result out;
+        const auto details = ended.value("metadata", nlohmann::json::object());
+        out.status = details.value("return", -1);
+        const auto output = details.value("output", nlohmann::json::object());
+        const auto collect = [&](const char *stream, std::string &into) {
+            const auto log = text_at(output, stream);
+            if (log.empty()) return;
+            into = request("GET", log, nullptr, true).body;
+            try {
+                (void) metadata_of(request("DELETE", log));
+            } catch (const std::exception &) {
+                // A log left behind is LXD's to clear (at the instance's next start); the result stands.
+            }
+        };
+        collect("1", out.out);
+        collect("2", out.err);
+        return out;
     }
 
     std::string client::member() const {
