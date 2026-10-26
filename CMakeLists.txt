@@ -8,8 +8,9 @@ option(SC_LXD_BUILD_TESTS "Build simply-cpp-lxd tests" ${PROJECT_IS_TOP_LEVEL})
 get_sc_version()
 message(STATUS "SimplyCPP ${SC_MODULE} Version: ${SC_VERSION}")
 
-# sc::rest with client certificates, trust() and pinning since 1.22.0, del() since 1.23.0 (over libcurl), and nlohmann/json.
-find_or_install_package(sc-core simply-cpp-dev simply-cpp 1.23.0)
+# sc::rest with client certificates, trust() and pinning since 1.22.0, del() since 1.23.0, put() since 1.25.0 (over libcurl),
+# and nlohmann/json.
+find_or_install_package(sc-core simply-cpp-dev simply-cpp 1.25.0)
 
 set(SOURCE_OBJECTS)
 set(SOURCE_LIBRARIES)
@@ -35,4 +36,4 @@ endif ()
 
 add_sc_example(sc-lxd-demo)
 
-package_sc_module(DEPENDS "simply-cpp (>= 1.23.0~)" DEV_DEPENDS "simply-cpp-dev (>= 1.23.0~)")
+package_sc_module(DEPENDS "simply-cpp (>= 1.25.0~)" DEV_DEPENDS "simply-cpp-dev (>= 1.25.0~)")
