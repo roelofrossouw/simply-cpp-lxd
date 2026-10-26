@@ -3,6 +3,7 @@
 #include <rest.h>
 
 #include <cctype>
+#include <cstdio>
 #include <utility>
 
 namespace sc::lxd {
@@ -79,7 +80,7 @@ namespace sc::lxd {
     }
 
     client::response client::request(const char *method, const std::string_view path, const std::string *body, const bool raw,
-                                     const std::chrono::seconds timeout) const {
+                                     const std::chrono::seconds timeout, const std::map<std::string, std::string> *headers) const {
         std::size_t first;
         {
             const std::lock_guard lock{mutex_};
@@ -95,6 +96,8 @@ namespace sc::lxd {
             if (!credentials_.pinned_key.empty()) call.pinned_public_key(credentials_.pinned_key);
             call.connect_timeout(std::min<long>(5, static_cast<long>(timeout_.count())));
             call.timeout(static_cast<long>(limit.count()));
+            if (headers)
+                for (const auto &[name, value]: *headers) call.header(name, value);
             const std::string_view verb{method};
             auto answer_body = verb == "POST" ? call.post(body ? *body : std::string{"{}"}) : verb == "DELETE" ? call.del() : call.get();
             const long status = call.status();
@@ -190,6 +193,29 @@ namespace sc::lxd {
             out.content = answer.body;
         }
         return out;
+    }
+
+    void client::write_file(const std::string_view instance, const std::string_view path, const file &what, const std::string_view project) const {
+        if (what.type != "file" && what.type != "symlink" && what.type != "directory")
+            throw std::invalid_argument("sc::lxd::client::write_file: a type of file, symlink or directory, not \"" + what.type + "\"");
+        char mode[8];
+        std::snprintf(mode, sizeof mode, "%04o", what.mode & 07777);
+        const std::map<std::string, std::string> headers{{"Content-Type", "application/octet-stream"}, {"X-LXD-type", what.type},
+                                                         {"X-LXD-uid", std::to_string(what.uid)}, {"X-LXD-gid", std::to_string(what.gid)},
+                                                         {"X-LXD-mode", mode}, {"X-LXD-write", "overwrite"}};
+        const std::string body = what.type == "directory" ? std::string{} : what.content;
+        (void) metadata_of(request("POST", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project),
+                                   &body, false, std::chrono::seconds{0}, &headers));
+    }
+
+    bool client::delete_file(const std::string_view instance, const std::string_view path, const std::string_view project) const {
+        try {
+            (void) metadata_of(request("DELETE", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project)));
+            return true;
+        } catch (const lxd::error &refused) {
+            if (refused.status() == 404) return false;
+            throw;
+        }
     }
 
     exec_result client::exec(const std::string_view instance, const std::vector<std::string> &command, const exec_options &options) const {

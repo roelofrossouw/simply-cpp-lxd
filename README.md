@@ -14,7 +14,8 @@ client certificate.
   on), type, status and LXD's status code, its global IPv4 addresses, memory and root-disk usage,
   created and last used.
 - **Files and commands.** `read_file()` gives a file, symlink or directory in an instance with its
-  type, mode and owner (nothing when it isn't there). `exec()` runs a command and gives its exit
+  type, mode and owner (nothing when it isn't there); `write_file()` writes one, with its owner and
+  mode, replacing what's there (since 1.2.0), and `delete_file()` removes one. `exec()` runs a command and gives its exit
   status, stdout and stderr: LXD records the output, which is read and then removed there, so no
   websocket is needed.
 
@@ -30,6 +31,8 @@ if (const auto web = lxd.find("web1")) std::cout << web->ipv4.front() << '\n';
 const auto networks = lxd.get("/1.0/networks?recursion=1"); // anything else, as JSON
 
 if (const auto hosts = lxd.read_file("web1", "/etc/hosts")) std::cout << hosts->content;
+lxd.write_file("web1", "/etc/motd", {.type = "file", .content = "Hello\n", .mode = 0644}); // root's, 644
+lxd.delete_file("web1", "/etc/motd");                                                   // false: nothing there
 const auto listed = lxd.exec("web1", {"sh", "-c", "apt list --upgradable"},
                              {.limit = std::chrono::minutes{5}, .environment = {{"LANG", "C.UTF-8"}}});
 if (listed.status == 0) std::cout << listed.out;

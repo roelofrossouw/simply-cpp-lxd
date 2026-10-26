@@ -9,6 +9,7 @@
 //     for (const auto &each: lxd.instances())
 //         std::cout << each.name << " on " << each.location << ": " << each.status << '\n';
 //     if (const auto hosts = lxd.read_file("web1", "/etc/hosts")) std::cout << hosts->content;
+//     lxd.write_file("web1", "/etc/motd", {.type = "file", .content = "Hello\n", .mode = 0644});
 //     const auto listed = lxd.exec("web1", {"dpkg-query", "-W"});
 //     if (listed.status == 0) std::cout << listed.out;
 
@@ -126,6 +127,15 @@ namespace sc::lxd {
         [[nodiscard]] std::optional<file> read_file(std::string_view instance, std::string_view path,
                                                     std::string_view project = "default") const;
 
+        // Writes a file (its bytes) or a symlink (its target, in content) at path, owned by uid and
+        // gid with mode's permission bits (a symlink's mode isn't used), replacing what's there; or
+        // makes a directory. The folder it's in must exist. Throws lxd::error when LXD refuses
+        // (403: a project the certificate may not use; 404: no such instance or folder).
+        void write_file(std::string_view instance, std::string_view path, const file &what, std::string_view project = "default") const;
+
+        // Removes a file, symlink or empty directory; false when there was nothing at path.
+        bool delete_file(std::string_view instance, std::string_view path, std::string_view project = "default") const;
+
         // Runs command in a running instance and waits for it to end: argv as is, no shell
         // unless it's one ({"sh", "-c", "..."}). Its output is recorded by LXD, read, and removed
         // there. Throws lxd::error when LXD refuses (an instance that isn't running: 400) or the
@@ -147,8 +157,10 @@ namespace sc::lxd {
 
         // The first member's answer that is LXD's (its JSON, or with raw a file's bytes), from the
         // one that answered last; lxd::unreachable when none answers. body: a POST of it.
+        // headers: the request's own besides the certificate's (a file's X-LXD-*, its Content-Type).
         [[nodiscard]] response request(const char *method, std::string_view path, const std::string *body = nullptr,
-                                       bool raw = false, std::chrono::seconds timeout = std::chrono::seconds{0}) const;
+                                       bool raw = false, std::chrono::seconds timeout = std::chrono::seconds{0},
+                                       const std::map<std::string, std::string> *headers = nullptr) const;
         // The metadata of LXD's JSON answer, or its lxd::error.
         [[nodiscard]] static nlohmann::json metadata_of(const response &answer);
 

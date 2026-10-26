@@ -88,6 +88,36 @@ int main() {
         CHECK_EQ(lxd.member(), live);
     }
 
+    SECTION("Files written: a file with owner and mode, a symlink, replaced, removed; a missing folder refused");
+    {
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};
+        lxd.write_file("web1", "/etc/69-oneweb.conf", {.type = "file", .content = std::string("a = 1\n\0", 7), .uid = 33, .gid = 4, .mode = 0640});
+        const auto written = lxd.read_file("web1", "/etc/69-oneweb.conf");
+        CHECK(written && written->type == "file");
+        if (written) {
+            CHECK_EQ(written->content, std::string("a = 1\n\0", 7));
+            CHECK_EQ(written->mode, 0640u);
+            CHECK_EQ(written->uid, 33);
+            CHECK_EQ(written->gid, 4);
+        }
+        lxd.write_file("web1", "/etc/69-oneweb.conf", {.type = "file", .content = "a = 2\n", .mode = 0644}); // replaced
+        const auto replaced = lxd.read_file("web1", "/etc/69-oneweb.conf");
+        CHECK(replaced && replaced->content == "a = 2\n" && replaced->mode == 0644u && replaced->uid == 0);
+        lxd.write_file("web1", "/etc/current", {.type = "symlink", .content = "/etc/69-oneweb.conf"});
+        const auto link = lxd.read_file("web1", "/etc/current");
+        CHECK(link && link->type == "symlink" && link->content == "/etc/69-oneweb.conf");
+        CHECK(lxd.delete_file("web1", "/etc/69-oneweb.conf"));
+        CHECK(!lxd.read_file("web1", "/etc/69-oneweb.conf"));
+        CHECK(!lxd.delete_file("web1", "/etc/69-oneweb.conf")); // nothing there any more
+        try {
+            lxd.write_file("web1", "/etc/nowhere.d/x.conf", {.type = "file", .content = "x"});
+            CHECK_MSG(false, "a write into a missing folder didn't throw");
+        } catch (const sc::lxd::error &refused) {
+            CHECK_EQ(refused.status(), 404);
+        }
+        CHECK_THROWS_AS(lxd.write_file("web1", "/etc/x", {.type = "pipe"}), std::invalid_argument);
+    }
+
     SECTION("exec: exit status and output, LXD's recorded output removed; refused; too slow");
     {
         const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};

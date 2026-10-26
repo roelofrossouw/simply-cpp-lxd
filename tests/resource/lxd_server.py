@@ -1,7 +1,8 @@
 """A stand-in for an LXD member, for sc-lxd's tests: HTTPS that wants a client certificate,
 answering as LXD does. Usage: lxd_server.py PORT SERVER_CERT SERVER_KEY CLIENT_CERT INSTANCES_JSON
 
-web1 has a few files (a file, a symlink, a directory). exec in web1 answers without running
+web1 has a few files (a file, a symlink, a directory); files can be written there (in a folder it
+has, or / and /etc) and removed. exec in web1 answers without running
 anything: its output is the command joined by spaces, "warned" on stderr, exit status 3 when the
 command has "fail" in it; one with "sleep" is still running at the wait's timeout."""
 import http.server, json, ssl, sys, urllib.parse, uuid
@@ -45,7 +46,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urllib.parse.urlsplit(self.path)
-        order = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        data = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if url.path == "/1.0/instances/web1/files":
+            # A write, as LXD takes one: the bytes, X-LXD-* for what it is. The folder must exist.
+            path = urllib.parse.parse_qs(url.query).get("path", [""])[0]
+            folder = path.rsplit("/", 1)[0] or "/"
+            if folder not in files and folder not in ("/", "/etc"):
+                return self.missing("Parent directory not found")
+            if self.headers.get("X-LXD-write", "overwrite") != "overwrite":
+                return self.answer(400, {"type": "error", "error": "only overwrite in the test", "error_code": 400})
+            kind = self.headers.get("X-LXD-type", "file")
+            files[path] = {"type": kind, "mode": self.headers.get("X-LXD-mode", "0644"), "uid": self.headers.get("X-LXD-uid", "0"),
+                           "gid": self.headers.get("X-LXD-gid", "0"), "content": data, "entries": []}
+            return self.ok({})
+        order = json.loads(data or b"{}")
         if url.path == "/1.0/instances/web2/exec":
             return self.answer(400, {"type": "error", "error": "Instance is not running", "error_code": 400})
         if url.path != "/1.0/instances/web1/exec":
@@ -70,7 +84,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           "operation": "/1.0/operations/" + id, "metadata": {"id": id, "class": "task"}})
 
     def do_DELETE(self):
-        path = urllib.parse.urlsplit(self.path).path
+        url = urllib.parse.urlsplit(self.path)
+        path = url.path
+        if path == "/1.0/instances/web1/files":
+            target = urllib.parse.parse_qs(url.query).get("path", [""])[0]
+            if target not in files:
+                return self.missing()
+            del files[target]
+            return self.ok({})
         if path in logs:
             del logs[path]
             return self.ok({})
