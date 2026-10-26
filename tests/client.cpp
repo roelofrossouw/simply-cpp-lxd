@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 #include <thread>
@@ -24,10 +25,19 @@ int main() {
     for (const std::string name: {"server", "client", "stranger"})
         CHECK_EQ(std::system(("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=sc-lxd-" + name +
                               " -keyout " + at(name + ".key") + " -out " + at(name + ".crt") + " > /dev/null 2>&1").c_str()), 0);
-    const int port = 19443 + static_cast<int>(std::random_device{}() % 1000);
-    CHECK_EQ(std::system(("python3 " SC_LXD_TEST_RESOURCE "/lxd_server.py " + std::to_string(port) + " " + at("server.crt") + " " +
+    // A free port of the system's choice, which the server says ("listening PORT"): a port picked
+    // here could be one something else listens on.
+    CHECK_EQ(std::system(("python3 " SC_LXD_TEST_RESOURCE "/lxd_server.py 0 " + at("server.crt") + " " +
                           at("server.key") + " " + at("client.crt") + " " SC_LXD_TEST_RESOURCE "/instances.json > " + at("server.log") +
                           " 2>&1 & echo $! > " + at("server.pid")).c_str()), 0);
+    int port = 0;
+    for (int tries = 0; tries < 100 && port == 0; ++tries) {
+        std::ifstream log{at("server.log")};
+        std::string word;
+        if (log >> word && word == "listening") log >> port;
+        if (port == 0) std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    CHECK(port != 0);
     const std::string live = "https://127.0.0.1:" + std::to_string(port);
     const std::string dead = "https://127.0.0.1:9"; // nothing listens on the discard port
     const sc::lxd::credentials known{.certificate = at("client.crt"), .key = at("client.key"), .server_certificate = at("server.crt")};

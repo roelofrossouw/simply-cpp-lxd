@@ -1,5 +1,6 @@
 """A stand-in for an LXD member, for sc-lxd's tests: HTTPS that wants a client certificate,
 answering as LXD does. Usage: lxd_server.py PORT SERVER_CERT SERVER_KEY CLIENT_CERT INSTANCES_JSON
+(PORT 0: a free one, the system's choice; "listening PORT" on stdout says which).
 
 web1 has a few files (a file, a symlink, a directory); files can be written there (in a folder it
 has, or / and /etc) and removed. exec in web1 answers without running
@@ -133,5 +134,5 @@ context.verify_mode = ssl.CERT_REQUIRED
 context.load_verify_locations(client_cert)
 server = http.server.HTTPServer(("127.0.0.1", int(port)), Handler)
 server.socket = context.wrap_socket(server.socket, server_side=True)
-print("listening", flush=True)
+print("listening", server.server_address[1], flush=True)
 server.serve_forever()
