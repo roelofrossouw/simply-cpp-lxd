@@ -157,6 +157,42 @@ int main() {
         CHECK_THROWS_AS((void) lxd.exec("web1", {}), std::invalid_argument);
     }
 
+    SECTION("Instances made, started, stopped and removed; a name taken; a failed image; removing what isn't there");
+    {
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};
+        lxd.create({{"name", "new1"}, {"type", "container"}, {"profiles", {"default"}}, {"config", {{"limits.cpu", "2"}}},
+                    {"source", {{"type", "image"}, {"protocol", "simplestreams"}, {"server", "https://cloud-images.ubuntu.com/releases"},
+                                {"alias", "resolute"}}}},
+                   "default", "hv2");
+        auto made = lxd.find("new1");
+        CHECK(made.has_value());
+        if (made) {
+            CHECK_EQ(made->location, std::string{"hv2"});
+            CHECK_EQ(made->status_code, 102);
+        }
+        lxd.change_state("new1", "start");
+        made = lxd.find("new1");
+        CHECK(made && made->status_code == 103);
+        CHECK(made && made->ipv4 == std::vector<std::string>{"10.0.100.250"});
+        try {
+            lxd.create({{"name", "new1"}, {"source", {{"type", "image"}, {"alias", "resolute"}}}});
+            CHECK_MSG(false, "making an instance of a name there is didn't throw");
+        } catch (const sc::lxd::error &taken) {
+            CHECK_EQ(taken.status(), 409);
+        }
+        try {
+            lxd.create({{"name", "new2"}, {"source", {{"type", "image"}, {"alias", "broken"}}}});
+            CHECK_MSG(false, "a failed image didn't throw");
+        } catch (const sc::lxd::error &failed) {
+            CHECK_EQ(failed.status(), 500);
+            CHECK(std::string{failed.what()}.find("image not found") != std::string::npos);
+        }
+        CHECK(!lxd.find("new2").has_value());
+        CHECK(lxd.remove("new1")); // running: stopped first
+        CHECK(!lxd.find("new1").has_value());
+        CHECK(!lxd.remove("new1"));
+    }
+
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");
     {
         CHECK_THROWS_AS((void) sc::lxd::client({dead}, known, std::chrono::seconds{2}).instances(), sc::lxd::unreachable);

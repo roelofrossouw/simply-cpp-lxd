@@ -5,7 +5,11 @@ answering as LXD does. Usage: lxd_server.py PORT SERVER_CERT SERVER_KEY CLIENT_C
 web1 has a few files (a file, a symlink, a directory); files can be written there (in a folder it
 has, or / and /etc) and removed. exec in web1 answers without running
 anything: its output is the command joined by spaces, "warned" on stderr, exit status 3 when the
-command has "fail" in it; one with "sleep" is still running at the wait's timeout."""
+command has "fail" in it; one with "sleep" is still running at the wait's timeout.
+
+Instances can be made (POST /1.0/instances: stopped, on ?target=; 409 for a name there is, a failed
+operation for the image alias "broken"), started and stopped (PUT .../state: running with an
+address, or stopped) and removed (DELETE, only a stopped one)."""
 import http.server, json, ssl, sys, urllib.parse, uuid
 
 port, server_cert, server_key, client_cert, instances_file = sys.argv[1:6]
@@ -45,6 +49,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def missing(self, what="Not Found"):
         self.answer(404, {"type": "error", "error": what, "error_code": 404})
 
+    def operation(self, status="Success", err=""):
+        id = str(uuid.uuid4())
+        operations[id] = {"id": id, "status": status, "err": err, "metadata": {}}
+        self.answer(202, {"type": "async", "status": "Operation created", "status_code": 100,
+                          "operation": "/1.0/operations/" + id, "metadata": {"id": id, "class": "task"}})
+
+    def instance(self, name, project):
+        return next((each for each in instances if each["name"] == name and each["project"] == project), None)
+
+    def do_PUT(self):
+        url = urllib.parse.urlsplit(self.path)
+        order = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        project = urllib.parse.parse_qs(url.query).get("project", ["default"])[0]
+        if not (url.path.startswith("/1.0/instances/") and url.path.endswith("/state")):
+            return self.missing()
+        found = self.instance(urllib.parse.unquote(url.path[len("/1.0/instances/"):-len("/state")]), project)
+        if not found:
+            return self.missing("Instance not found")
+        running = order.get("action") in ("start", "restart")
+        found["status"], found["status_code"] = ("Running", 103) if running else ("Stopped", 102)
+        found["state"] = {"status": found["status"], "status_code": found["status_code"], "memory": {"usage": 0}, "disk": {},
+                          "network": {"eth0": {"addresses": [{"family": "inet", "address": "10.0.100.250", "scope": "global"}]}}
+                          if running else None}
+        self.operation()
+
     def do_POST(self):
         url = urllib.parse.urlsplit(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -61,6 +90,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                            "gid": self.headers.get("X-LXD-gid", "0"), "content": data, "entries": []}
             return self.ok({})
         order = json.loads(data or b"{}")
+        if url.path == "/1.0/instances":
+            query = urllib.parse.parse_qs(url.query)
+            project = query.get("project", ["default"])[0]
+            if self.instance(order.get("name"), project):
+                return self.answer(409, {"type": "error", "error": "Instance \"" + order["name"] + "\" already exists", "error_code": 409})
+            if order.get("source", {}).get("alias") == "broken":
+                return self.operation("Failure", "Failed getting remote image info: image not found")
+            instances.append({"name": order["name"], "project": project, "location": query.get("target", ["hv"])[0],
+                              "type": order.get("type", "container"), "description": "", "status": "Stopped", "status_code": 102,
+                              "created_at": "2026-10-26T12:00:00Z", "last_used_at": "", "config": order.get("config", {}),
+                              "devices": order.get("devices", {}), "profiles": order.get("profiles", []),
+                              "state": {"status": "Stopped", "status_code": 102, "memory": {"usage": 0}, "disk": {}, "network": None}})
+            return self.operation()
         if url.path == "/1.0/instances/web2/exec":
             return self.answer(400, {"type": "error", "error": "Instance is not running", "error_code": 400})
         if url.path != "/1.0/instances/web1/exec":
@@ -96,6 +138,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in logs:
             del logs[path]
             return self.ok({})
+        if path.startswith("/1.0/instances/"):
+            found = self.instance(urllib.parse.unquote(path[len("/1.0/instances/"):]),
+                                  urllib.parse.parse_qs(url.query).get("project", ["default"])[0])
+            if not found:
+                return self.missing("Instance not found")
+            if found["status_code"] != 102:
+                return self.answer(400, {"type": "error", "error": "Instance is running", "error_code": 400})
+            instances.remove(found)
+            return self.operation()
         self.missing()
 
     def do_GET(self):

@@ -99,7 +99,10 @@ namespace sc::lxd {
             if (headers)
                 for (const auto &[name, value]: *headers) call.header(name, value);
             const std::string_view verb{method};
-            auto answer_body = verb == "POST" ? call.post(body ? *body : std::string{"{}"}) : verb == "DELETE" ? call.del() : call.get();
+            auto answer_body = verb == "POST"     ? call.post(body ? *body : std::string{"{}"})
+                               : verb == "PUT"    ? call.put(body ? *body : std::string{"{}"})
+                               : verb == "DELETE" ? call.del()
+                                                  : call.get();
             const long status = call.status();
             std::string why;
             if (status == 0) {
@@ -253,6 +256,43 @@ namespace sc::lxd {
         collect("1", out.out);
         collect("2", out.err);
         return out;
+    }
+
+    void client::wait_for(const nlohmann::json &operation, const std::string_view project, const std::chrono::seconds limit,
+                          const std::string &what) const {
+        const auto id = text_at(operation, "id");
+        if (id.empty()) throw lxd::error{"sc::lxd: " + what + " started no operation", 0};
+        // The wait answers when it ends, or with it still running at the limit.
+        const auto seconds = std::to_string(limit.count());
+        const auto ended = metadata_of(request("GET", "/1.0/operations/" + encoded(id) + "/wait?timeout=" + seconds + "&project=" + encoded(project),
+                                               nullptr, false, limit + timeout_));
+        const auto status = text_at(ended, "status");
+        if (status == "Running") throw lxd::error{"sc::lxd: " + what + " was still going after " + seconds + " s", 408};
+        if (status != "Success") throw lxd::error{"sc::lxd: " + what + ": " + text_at(ended, "err"), 500};
+    }
+
+    void client::create(const nlohmann::json &body, const std::string_view project, const std::string_view target, const std::chrono::seconds limit) const {
+        const auto text = body.dump();
+        const auto name = body.value("name", std::string{});
+        const auto started = metadata_of(request("POST", "/1.0/instances?project=" + encoded(project) +
+                                                             (target.empty() ? std::string{} : "&target=" + encoded(target)), &text));
+        wait_for(started, project, limit, "making " + name);
+    }
+
+    void client::change_state(const std::string_view instance, const std::string_view action, const std::string_view project, const bool force,
+                              const std::chrono::seconds limit) const {
+        const auto text = nlohmann::json{{"action", action}, {"timeout", static_cast<int>(limit.count())}, {"force", force}}.dump();
+        const auto started = metadata_of(request("PUT", "/1.0/instances/" + encoded(instance) + "/state?project=" + encoded(project), &text));
+        wait_for(started, project, limit, std::string{action} + " " + std::string{instance});
+    }
+
+    bool client::remove(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit) const {
+        const auto there = find(instance, project);
+        if (!there) return false;
+        if (there->status_code != 102) change_state(instance, "stop", project, true, limit); // 102: Stopped
+        const auto started = metadata_of(request("DELETE", "/1.0/instances/" + encoded(instance) + "?project=" + encoded(project)));
+        wait_for(started, project, limit, "removing " + std::string{instance});
+        return true;
     }
 
     std::string client::member() const {

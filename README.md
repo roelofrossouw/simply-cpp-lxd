@@ -18,6 +18,11 @@ client certificate.
   mode, replacing what's there (since 1.2.0), and `delete_file()` removes one. `exec()` runs a command and gives its exit
   status, stdout and stderr: LXD records the output, which is read and then removed there, so no
   websocket is needed.
+- **Instances made, started and removed** (since 1.3.0). `create()` makes one from a body as LXD
+  takes it (name, type, source, profiles, config, devices), on a cluster member of your choice, and
+  waits for it, an image's download included; `change_state()` starts, stops or restarts one and
+  waits; `remove()` removes one, stopping it first when it runs. Each throws `sc::lxd::error`: 409
+  for a name that's taken, 500 when LXD's operation fails, 408 when it's still going at the limit.
 
 ```cpp
 #include <sc_lxd.h>
@@ -36,6 +41,13 @@ lxd.delete_file("web1", "/etc/motd");                                           
 const auto listed = lxd.exec("web1", {"sh", "-c", "apt list --upgradable"},
                              {.limit = std::chrono::minutes{5}, .environment = {{"LANG", "C.UTF-8"}}});
 if (listed.status == 0) std::cout << listed.out;
+
+lxd.create({{"name", "web3"}, {"type", "container"}, {"profiles", {"default"}},
+            {"source", {{"type", "image"}, {"protocol", "simplestreams"},
+                        {"server", "https://cloud-images.ubuntu.com/releases"}, {"alias", "noble"}}}},
+           "default", "hv2");                                                         // on member hv2
+lxd.change_state("web3", "start");
+lxd.remove("web3");                                                                   // stopped first
 ```
 
 `get()` returns the answer's `metadata`. `exec()` throws `sc::lxd::error` when LXD refuses (an

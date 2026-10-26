@@ -143,6 +143,24 @@ namespace sc::lxd {
         [[nodiscard]] exec_result exec(std::string_view instance, const std::vector<std::string> &command,
                                        const exec_options &options = {}) const;
 
+        // Makes an instance: POST /1.0/instances with body as LXD takes it (name, type, source,
+        // profiles, config, devices), on the cluster member target (empty: LXD's choice), and
+        // waits until it's made, an image's download included, or limit passes. Throws lxd::error
+        // when LXD refuses (409: an instance of that name exists) or making it fails (500), 408
+        // when it's still going at the limit.
+        void create(const nlohmann::json &body, std::string_view project = "default", std::string_view target = {},
+                    std::chrono::seconds limit = std::chrono::minutes{10}) const;
+
+        // Starts, stops or restarts an instance (action "start", "stop", "restart"; force: a stop
+        // that doesn't wait for it to shut down) and waits until it's done or limit passes.
+        // Throws lxd::error as create() does.
+        void change_state(std::string_view instance, std::string_view action, std::string_view project = "default",
+                          bool force = false, std::chrono::seconds limit = std::chrono::minutes{2}) const;
+
+        // Removes an instance, stopping it first (forced) when it runs; false when there's none.
+        bool remove(std::string_view instance, std::string_view project = "default",
+                    std::chrono::seconds limit = std::chrono::minutes{2}) const;
+
         // The URL of the member that answered last (the first before any did).
         [[nodiscard]] std::string member() const;
 
@@ -158,11 +176,15 @@ namespace sc::lxd {
         // The first member's answer that is LXD's (its JSON, or with raw a file's bytes), from the
         // one that answered last; lxd::unreachable when none answers. body: a POST of it.
         // headers: the request's own besides the certificate's (a file's X-LXD-*, its Content-Type).
+        // method: GET, POST, PUT (body: what it sends) or DELETE.
         [[nodiscard]] response request(const char *method, std::string_view path, const std::string *body = nullptr,
                                        bool raw = false, std::chrono::seconds timeout = std::chrono::seconds{0},
                                        const std::map<std::string, std::string> *headers = nullptr) const;
         // The metadata of LXD's JSON answer, or its lxd::error.
         [[nodiscard]] static nlohmann::json metadata_of(const response &answer);
+        // Waits for a background operation LXD started (its metadata, with its id) to end;
+        // lxd::error when it failed (500) or is still running at limit (408). what names it.
+        void wait_for(const nlohmann::json &operation, std::string_view project, std::chrono::seconds limit, const std::string &what) const;
 
         std::vector<std::string> members_;
         credentials credentials_;
