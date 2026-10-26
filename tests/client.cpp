@@ -22,8 +22,12 @@ int main() {
     const auto dir = fs::temp_directory_path() / ("sc-lxd-test-" + std::to_string(std::random_device{}()));
     fs::create_directories(dir);
     const auto at = [&](const std::string &name) { return (dir / name).string(); };
+    // The curve named and the extensions spelt out: macOS's own openssl (LibreSSL) otherwise writes
+    // the key's curve out in full and adds no extensions, and TLS with OpenSSL 3 refuses both.
     for (const std::string name: {"server", "client", "stranger"})
-        CHECK_EQ(std::system(("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=sc-lxd-" + name +
+        CHECK_EQ(std::system(("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -nodes -days 1 -subj /CN=sc-lxd-" + name +
+                              " -addext basicConstraints=critical,CA:TRUE -addext subjectKeyIdentifier=hash -addext authorityKeyIdentifier=keyid:always"
+                              " -addext keyUsage=critical,digitalSignature,keyCertSign -addext subjectAltName=IP:127.0.0.1"
                               " -keyout " + at(name + ".key") + " -out " + at(name + ".crt") + " > /dev/null 2>&1").c_str()), 0);
     // A free port of the system's choice, which the server says ("listening PORT"): a port picked
     // here could be one something else listens on.

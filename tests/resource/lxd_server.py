@@ -130,6 +130,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(server_cert, server_key)
+# TLS 1.2 at most: macOS's libcurl (LibreSSL 3.3) can't decode OpenSSL 4's TLS 1.3 handshake (Homebrew's Python).
+context.maximum_version = ssl.TLSVersion.TLSv1_2
 context.verify_mode = ssl.CERT_REQUIRED
 context.load_verify_locations(client_cert)
 server = http.server.HTTPServer(("127.0.0.1", int(port)), Handler)
