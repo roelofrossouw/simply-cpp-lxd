@@ -128,8 +128,9 @@ namespace sc::lxd {
                                                     std::string_view project = "default") const;
 
         // Writes a file (its bytes) or a symlink (its target, in content) at path, owned by uid and
-        // gid with mode's permission bits (a symlink's mode isn't used), replacing what's there; or
-        // makes a directory. The folder it's in must exist. Throws lxd::error when LXD refuses
+        // gid with mode's permission bits (a symlink's mode isn't used), replacing what's there, its
+        // owner and mode too (LXD's X-LXD-modify-perm, since 1.4.1: else LXD keeps them); or makes
+        // a directory. The folder it's in must exist. Throws lxd::error when LXD refuses
         // (403: a project the certificate may not use; 404: no such instance or folder).
         void write_file(std::string_view instance, std::string_view path, const file &what, std::string_view project = "default") const;
 

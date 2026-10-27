@@ -205,7 +205,9 @@ namespace sc::lxd {
         std::snprintf(mode, sizeof mode, "%04o", what.mode & 07777);
         const std::map<std::string, std::string> headers{{"Content-Type", "application/octet-stream"}, {"X-LXD-type", what.type},
                                                          {"X-LXD-uid", std::to_string(what.uid)}, {"X-LXD-gid", std::to_string(what.gid)},
-                                                         {"X-LXD-mode", mode}, {"X-LXD-write", "overwrite"}};
+                                                         {"X-LXD-mode", mode}, {"X-LXD-write", "overwrite"},
+                                                         // Else LXD keeps what's there's owner and mode (instances_files_modify_permissions).
+                                                         {"X-LXD-modify-perm", "uid,gid,mode"}};
         const std::string body = what.type == "directory" ? std::string{} : what.content;
         (void) metadata_of(request("POST", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project),
                                    &body, false, std::chrono::seconds{0}, &headers));

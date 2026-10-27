@@ -104,8 +104,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.headers.get("X-LXD-write", "overwrite") != "overwrite":
                 return self.answer(400, {"type": "error", "error": "only overwrite in the test", "error_code": 400})
             kind = self.headers.get("X-LXD-type", "file")
-            files[path] = {"type": kind, "mode": self.headers.get("X-LXD-mode", "0644"), "uid": self.headers.get("X-LXD-uid", "0"),
-                           "gid": self.headers.get("X-LXD-gid", "0"), "content": data, "entries": []}
+            written = {"type": kind, "mode": self.headers.get("X-LXD-mode", "0644"), "uid": self.headers.get("X-LXD-uid", "0"),
+                       "gid": self.headers.get("X-LXD-gid", "0"), "content": data, "entries": []}
+            # As LXD: what's there keeps its owner and mode, unless X-LXD-modify-perm names them.
+            before = files.get(path)
+            if before and before["type"] == kind:
+                modify = [each.strip() for each in self.headers.get("X-LXD-modify-perm", "").split(",")]
+                for name in ("uid", "gid", "mode"):
+                    if name not in modify:
+                        written[name] = before[name]
+            files[path] = written
             return self.ok({})
         order = json.loads(data or b"{}")
         if url.path == "/1.0/instances":
