@@ -157,6 +157,14 @@ namespace sc::lxd {
         void change_state(std::string_view instance, std::string_view action, std::string_view project = "default",
                           bool force = false, std::chrono::seconds limit = std::chrono::minutes{2}) const;
 
+        // Sets keys of an instance's own config to values, keeping every other key, its devices
+        // and profiles as they are: its config read, changed and put back (PUT, guarded by the
+        // ETag LXD gave with it: read again when the instance changed meanwhile, three times at
+        // most). Running or stopped; some keys take effect only at its next start. Throws
+        // lxd::error as create() does (400: a value LXD refuses; 404: no such instance).
+        void set_config(std::string_view instance, const std::map<std::string, std::string> &values, std::string_view project = "default",
+                        std::chrono::seconds limit = std::chrono::minutes{1}) const;
+
         // Removes an instance, stopping it first (forced) when it runs; false when there's none.
         bool remove(std::string_view instance, std::string_view project = "default",
                     std::chrono::seconds limit = std::chrono::minutes{2}) const;

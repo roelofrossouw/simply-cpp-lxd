@@ -193,6 +193,30 @@ int main() {
         CHECK(!lxd.remove("new1"));
     }
 
+    SECTION("Config keys set, the others kept; a value LXD refuses; no such instance");
+    {
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};
+        lxd.set_config("web1", {{"limits.cpu", "4"}, {"raw.idmap", "both 33-2000 33-2000"}});
+        lxd.set_config("web1", {{"limits.memory", "4GiB"}});
+        const auto config = lxd.get("/1.0/instances/web1")["config"];
+        CHECK_EQ(config.value("limits.cpu", ""), std::string{"4"});
+        CHECK_EQ(config.value("raw.idmap", ""), std::string{"both 33-2000 33-2000"});
+        CHECK_EQ(config.value("limits.memory", ""), std::string{"4GiB"});
+        try {
+            lxd.set_config("web1", {{"limits.cpu", "many"}});
+            CHECK_MSG(false, "a value LXD refuses didn't throw");
+        } catch (const sc::lxd::error &refused) {
+            CHECK_EQ(refused.status(), 400);
+        }
+        CHECK_EQ(lxd.get("/1.0/instances/web1")["config"].value("limits.cpu", ""), std::string{"4"});
+        try {
+            lxd.set_config("none", {{"limits.cpu", "1"}});
+            CHECK_MSG(false, "no such instance didn't throw");
+        } catch (const sc::lxd::error &missing) {
+            CHECK_EQ(missing.status(), 404);
+        }
+    }
+
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");
     {
         CHECK_THROWS_AS((void) sc::lxd::client({dead}, known, std::chrono::seconds{2}).instances(), sc::lxd::unreachable);

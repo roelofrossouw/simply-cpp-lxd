@@ -23,6 +23,9 @@ client certificate.
   waits for it, an image's download included; `change_state()` starts, stops or restarts one and
   waits; `remove()` removes one, stopping it first when it runs. Each throws `sc::lxd::error`: 409
   for a name that's taken, 500 when LXD's operation fails, 408 when it's still going at the limit.
+- **Config keys set** (since 1.4.0). `set_config()` sets some keys of an instance's own config and
+  keeps the rest, its devices and profiles: read, changed and put back, guarded by LXD's ETag (read
+  again when the instance changed meanwhile). 400 for a value LXD refuses.
 
 ```cpp
 #include <sc_lxd.h>
@@ -47,6 +50,7 @@ lxd.create({{"name", "web3"}, {"type", "container"}, {"profiles", {"default"}},
                         {"server", "https://cloud-images.ubuntu.com/releases"}, {"alias", "noble"}}}},
            "default", "hv2");                                                         // on member hv2
 lxd.change_state("web3", "start");
+lxd.set_config("web3", {{"limits.cpu", "4"}, {"limits.memory", "8GiB"}});            // the rest kept
 lxd.remove("web3");                                                                   // stopped first
 ```
 

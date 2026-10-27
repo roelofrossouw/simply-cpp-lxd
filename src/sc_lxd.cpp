@@ -286,6 +286,33 @@ namespace sc::lxd {
         wait_for(started, project, limit, std::string{action} + " " + std::string{instance});
     }
 
+    void client::set_config(const std::string_view instance, const std::map<std::string, std::string> &values, const std::string_view project,
+                            const std::chrono::seconds limit) const {
+        const auto path = "/1.0/instances/" + encoded(instance) + "?project=" + encoded(project);
+        for (int attempt = 1;; ++attempt) {
+            const auto read = request("GET", path);
+            const auto current = metadata_of(read);
+            // What PUT takes (InstancePut), as it is now.
+            nlohmann::json body = nlohmann::json::object();
+            for (const char *key: {"architecture", "config", "devices", "ephemeral", "profiles", "stateful", "description"})
+                if (current.contains(key)) body[key] = current[key];
+            if (!body.contains("config") || !body["config"].is_object()) body["config"] = nlohmann::json::object();
+            for (const auto &[key, value]: values) body["config"][key] = value;
+            std::map<std::string, std::string> headers;
+            if (const auto tag = read.headers.find("etag"); tag != read.headers.end()) headers["If-Match"] = tag->second;
+            const auto text = body.dump();
+            try {
+                const auto answer = request("PUT", path, &text, false, std::chrono::seconds{0}, &headers);
+                const auto started = metadata_of(answer);
+                if (nlohmann::json::parse(answer.body, nullptr, false).value("type", "") == "async")
+                    wait_for(started, project, limit, "changing " + std::string{instance} + "'s config");
+                return;
+            } catch (const lxd::error &refused) {
+                if (refused.status() != 412 || attempt == 3) throw; // 412: changed since it was read
+            }
+        }
+    }
+
     bool client::remove(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit) const {
         const auto there = find(instance, project);
         if (!there) return false;

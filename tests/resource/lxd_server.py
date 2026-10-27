@@ -9,8 +9,10 @@ command has "fail" in it; one with "sleep" is still running at the wait's timeou
 
 Instances can be made (POST /1.0/instances: stopped, on ?target=; 409 for a name there is, a failed
 operation for the image alias "broken"), started and stopped (PUT .../state: running with an
-address, or stopped) and removed (DELETE, only a stopped one)."""
-import http.server, json, ssl, sys, urllib.parse, uuid
+address, or stopped), changed (PUT on the instance, with the ETag its GET gave in If-Match: 412
+when it's another; a limits.cpu that isn't a number refused, 400) and removed (DELETE, only a
+stopped one)."""
+import hashlib, http.server, json, ssl, sys, urllib.parse, uuid
 
 port, server_cert, server_key, client_cert, instances_file = sys.argv[1:6]
 instances = json.load(open(instances_file))
@@ -58,10 +60,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def instance(self, name, project):
         return next((each for each in instances if each["name"] == name and each["project"] == project), None)
 
+    @staticmethod
+    def etag(found):
+        return hashlib.sha256(json.dumps([found.get(key) for key in ("config", "devices", "profiles")], sort_keys=True).encode()).hexdigest()
+
     def do_PUT(self):
         url = urllib.parse.urlsplit(self.path)
         order = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         project = urllib.parse.parse_qs(url.query).get("project", ["default"])[0]
+        if url.path.startswith("/1.0/instances/") and "/" not in url.path[len("/1.0/instances/"):]:
+            found = self.instance(urllib.parse.unquote(url.path[len("/1.0/instances/"):]), project)
+            if not found:
+                return self.missing("Instance not found")
+            if self.headers.get("If-Match") not in (None, self.etag(found)):
+                return self.answer(412, {"type": "error", "error": "ETag doesn't match", "error_code": 412})
+            if not str(order.get("config", {}).get("limits.cpu", "1")).isdigit():
+                return self.answer(400, {"type": "error", "error": "Invalid config: limits.cpu", "error_code": 400})
+            for key in ("config", "devices", "profiles", "description"):
+                if key in order:
+                    found[key] = order[key]
+            return self.operation()
         if not (url.path.startswith("/1.0/instances/") and url.path.endswith("/state")):
             return self.missing()
         found = self.instance(urllib.parse.unquote(url.path[len("/1.0/instances/"):-len("/state")]), project)
@@ -172,7 +190,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = urllib.parse.unquote(url.path[len("/1.0/instances/"):])
             for each in instances:
                 if each["name"] == name and each["project"] == query.get("project", ["default"])[0]:
-                    return self.answer(200, {"type": "sync", "status": "Success", "status_code": 200, "metadata": each})
+                    data = json.dumps({"type": "sync", "status": "Success", "status_code": 200, "metadata": each}).encode()
+                    return self.raw(data, {"Content-Type": "application/json", "ETag": self.etag(each)})
         self.answer(404, {"type": "error", "error": "Instance not found", "error_code": 404})
 
     def log_message(self, *args):
