@@ -5,7 +5,7 @@
     "created_at": "2024-03-01T10:00:00Z", "last_used_at": "2026-10-20T06:00:00Z",
     "state": {
       "status": "Running", "status_code": 103,
-      "memory": {"usage": 734003200, "usage_peak": 0},
+      "memory": {"usage": 734003200, "usage_peak": 0, "swap_usage": 1048576}, "cpu": {"usage": 23248148000}, "processes": 39,
       "disk": {"root": {"usage": 5368709120}},
       "network": {
         "lo": {"addresses": [{"family": "inet", "address": "127.0.0.1", "netmask": "8", "scope": "local"}]},

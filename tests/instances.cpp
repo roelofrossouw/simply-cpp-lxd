@@ -23,6 +23,9 @@ int main() {
         CHECK(web.ipv4 == std::vector<std::string>({"10.0.100.21", "10.0.105.21"}));
         CHECK(web.memory_usage && *web.memory_usage == 734003200);
         CHECK(web.disk_usage && *web.disk_usage == 5368709120);
+        CHECK(web.swap_usage && *web.swap_usage == 1048576);
+        CHECK(web.cpu_usage && *web.cpu_usage == 23248148000);
+        CHECK(web.processes && *web.processes == 39);
         CHECK_EQ(web.created_at, std::string{"2024-03-01T10:00:00Z"});
         CHECK_EQ(web.last_used_at, std::string{"2026-10-20T06:00:00Z"});
     }
@@ -33,6 +36,7 @@ int main() {
         CHECK_EQ(old.status_code, 102);
         CHECK(!old.memory_usage);
         CHECK(!old.disk_usage);
+        CHECK(!old.swap_usage && !old.cpu_usage && !old.processes);
         CHECK(old.ipv4.empty());
     }
 

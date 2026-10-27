@@ -59,6 +59,12 @@ namespace sc::lxd {
         // A stopped instance reports 0 bytes of memory: that's none in use, not a reading.
         if (const auto memory = number_at(*state, {"memory", "usage"}); memory && *memory > 0) out.memory_usage = memory;
         out.disk_usage = number_at(*state, {"disk", "root", "usage"});
+        // The rest only mean something while it runs: a stopped one reports zeros (processes -1).
+        if (out.status_code == 103) {
+            out.swap_usage = number_at(*state, {"memory", "swap_usage"});
+            out.cpu_usage = number_at(*state, {"cpu", "usage"});
+            if (const auto running = number_at(*state, {"processes"}); running && *running >= 0) out.processes = running;
+        }
         if (const auto network = state->find("network"); network != state->end() && network->is_object()) {
             for (const auto &[interface, details]: network->items()) {
                 if (interface == "lo" || !details.contains("addresses") || !details["addresses"].is_array()) continue;

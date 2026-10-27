@@ -71,6 +71,9 @@ namespace sc::lxd {
         std::vector<std::string> ipv4;          // its global IPv4 addresses, every interface but lo
         std::optional<std::int64_t> memory_usage; // bytes; nothing when it isn't running
         std::optional<std::int64_t> disk_usage;   // its root disk's bytes, when the storage tells
+        std::optional<std::int64_t> swap_usage;   // bytes of swap; nothing when it isn't running (since 1.5.0)
+        std::optional<std::int64_t> cpu_usage;    // CPU time since it started, in nanoseconds; nothing when it isn't running
+        std::optional<std::int64_t> processes;    // how many run in it; nothing when it isn't running
         std::string created_at;   // RFC 3339, as LXD gives them
         std::string last_used_at;
 
