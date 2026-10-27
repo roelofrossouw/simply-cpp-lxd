@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -169,6 +170,12 @@ namespace sc::lxd {
         void set_config(std::string_view instance, const std::map<std::string, std::string> &values, std::string_view project = "default",
                         std::chrono::seconds limit = std::chrono::minutes{1}) const;
 
+        // Takes a device out of an instance's own config (one a profile gives stays), as set_config()
+        // changes it; a running container loses it at once (a disk unplugged). Its properties, or
+        // nothing when the instance's own config has no such device. Throws as set_config() does.
+        std::optional<nlohmann::json> remove_device(std::string_view instance, std::string_view device, std::string_view project = "default",
+                                                    std::chrono::seconds limit = std::chrono::minutes{1}) const;
+
         // Removes an instance, stopping it first (forced) when it runs; false when there's none.
         bool remove(std::string_view instance, std::string_view project = "default",
                     std::chrono::seconds limit = std::chrono::minutes{2}) const;
@@ -197,6 +204,11 @@ namespace sc::lxd {
         // Waits for a background operation LXD started (its metadata, with its id) to end;
         // lxd::error when it failed (500) or is still running at limit (408). what names it.
         void wait_for(const nlohmann::json &operation, std::string_view project, std::chrono::seconds limit, const std::string &what) const;
+        // An instance's settings read, changed by change (false: nothing to change, nothing sent)
+        // and put back, guarded by the ETag it was read with (read again when it changed meanwhile,
+        // three times at most): whether it was put back.
+        bool update(std::string_view instance, std::string_view project, std::chrono::seconds limit, const std::string &what,
+                    const std::function<bool(nlohmann::json &)> &change) const;
 
         std::vector<std::string> members_;
         credentials credentials_;

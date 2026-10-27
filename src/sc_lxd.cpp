@@ -294,8 +294,8 @@ namespace sc::lxd {
         wait_for(started, project, limit, std::string{action} + " " + std::string{instance});
     }
 
-    void client::set_config(const std::string_view instance, const std::map<std::string, std::string> &values, const std::string_view project,
-                            const std::chrono::seconds limit) const {
+    bool client::update(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit, const std::string &what,
+                        const std::function<bool(nlohmann::json &)> &change) const {
         const auto path = "/1.0/instances/" + encoded(instance) + "?project=" + encoded(project);
         for (int attempt = 1;; ++attempt) {
             const auto read = request("GET", path);
@@ -304,21 +304,43 @@ namespace sc::lxd {
             nlohmann::json body = nlohmann::json::object();
             for (const char *key: {"architecture", "config", "devices", "ephemeral", "profiles", "stateful", "description"})
                 if (current.contains(key)) body[key] = current[key];
-            if (!body.contains("config") || !body["config"].is_object()) body["config"] = nlohmann::json::object();
-            for (const auto &[key, value]: values) body["config"][key] = value;
+            for (const char *key: {"config", "devices"})
+                if (!body.contains(key) || !body[key].is_object()) body[key] = nlohmann::json::object();
+            if (!change(body)) return false;
             std::map<std::string, std::string> headers;
             if (const auto tag = read.headers.find("etag"); tag != read.headers.end()) headers["If-Match"] = tag->second;
             const auto text = body.dump();
             try {
                 const auto answer = request("PUT", path, &text, false, std::chrono::seconds{0}, &headers);
                 const auto started = metadata_of(answer);
-                if (nlohmann::json::parse(answer.body, nullptr, false).value("type", "") == "async")
-                    wait_for(started, project, limit, "changing " + std::string{instance} + "'s config");
-                return;
+                if (nlohmann::json::parse(answer.body, nullptr, false).value("type", "") == "async") wait_for(started, project, limit, what);
+                return true;
             } catch (const lxd::error &refused) {
                 if (refused.status() != 412 || attempt == 3) throw; // 412: changed since it was read
             }
         }
+    }
+
+    void client::set_config(const std::string_view instance, const std::map<std::string, std::string> &values, const std::string_view project,
+                            const std::chrono::seconds limit) const {
+        (void) update(instance, project, limit, "changing " + std::string{instance} + "'s config", [&](nlohmann::json &body) {
+            for (const auto &[key, value]: values) body["config"][key] = value;
+            return true;
+        });
+    }
+
+    std::optional<nlohmann::json> client::remove_device(const std::string_view instance, const std::string_view device, const std::string_view project,
+                                                        const std::chrono::seconds limit) const {
+        std::optional<nlohmann::json> removed;
+        (void) update(instance, project, limit, "removing " + std::string{device} + " from " + std::string{instance}, [&](nlohmann::json &body) {
+            removed.reset();
+            const auto found = body["devices"].find(std::string{device});
+            if (found == body["devices"].end()) return false;
+            removed = *found;
+            body["devices"].erase(found);
+            return true;
+        });
+        return removed;
     }
 
     bool client::remove(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit) const {

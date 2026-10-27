@@ -3,6 +3,7 @@
     "name": "web1", "project": "default", "location": "hv2", "type": "container", "description": "Apache",
     "status": "Running", "status_code": 103,
     "created_at": "2024-03-01T10:00:00Z", "last_used_at": "2026-10-20T06:00:00Z",
+    "devices": {"data": {"type": "disk", "source": "/srv/data", "path": "/data"}, "eth0": {"type": "nic", "network": "lxdbr0"}},
     "state": {
       "status": "Running", "status_code": 103,
       "memory": {"usage": 734003200, "usage_peak": 0, "swap_usage": 1048576}, "cpu": {"usage": 23248148000}, "processes": 39,

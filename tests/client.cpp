@@ -217,6 +217,19 @@ int main() {
         }
     }
 
+    SECTION("A device taken out, the others and the config kept; one that isn't there");
+    {
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{2}};
+        const auto removed = lxd.remove_device("web1", "data");
+        CHECK(removed && removed->value("source", "") == "/srv/data");
+        const auto after = lxd.get("/1.0/instances/web1");
+        CHECK(!after["devices"].contains("data"));
+        CHECK(after["devices"].contains("eth0"));
+        CHECK_EQ(after["config"].value("limits.cpu", ""), std::string{"4"}); // set_config's, above
+        CHECK(!lxd.remove_device("web1", "data"));
+        CHECK_THROWS_AS((void) lxd.remove_device("none", "data"), sc::lxd::error);
+    }
+
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");
     {
         CHECK_THROWS_AS((void) sc::lxd::client({dead}, known, std::chrono::seconds{2}).instances(), sc::lxd::unreachable);

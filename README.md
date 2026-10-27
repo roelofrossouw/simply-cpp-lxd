@@ -25,7 +25,8 @@ client certificate.
   for a name that's taken, 500 when LXD's operation fails, 408 when it's still going at the limit.
 - **Config keys set** (since 1.4.0). `set_config()` sets some keys of an instance's own config and
   keeps the rest, its devices and profiles: read, changed and put back, guarded by LXD's ETag (read
-  again when the instance changed meanwhile). 400 for a value LXD refuses.
+  again when the instance changed meanwhile). 400 for a value LXD refuses. `remove_device()`
+  (since 1.6.0) takes a device out of an instance's own config the same way and gives what it was.
 
 ```cpp
 #include <sc_lxd.h>
