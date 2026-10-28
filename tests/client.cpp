@@ -227,6 +227,15 @@ int main() {
         CHECK(after["devices"].contains("eth0"));
         CHECK_EQ(after["config"].value("limits.cpu", ""), std::string{"4"}); // set_config's, above
         CHECK(!lxd.remove_device("web1", "data"));
+        const nlohmann::json logs{{"type", "disk"}, {"source", "/srv/logs"}, {"path", "/logs"}};
+        auto set = lxd.set_device("web1", "logs", logs);
+        CHECK(set.changed && !set.before);
+        set = lxd.set_device("web1", "logs", logs); // as it is already
+        CHECK(!set.changed && set.before && *set.before == logs);
+        set = lxd.set_device("web1", "logs", {{"type", "disk"}, {"source", "/srv/logs"}, {"path", "/var/logs"}});
+        CHECK(set.changed && set.before && set.before->value("path", "") == "/logs");
+        CHECK_EQ(lxd.get("/1.0/instances/web1")["devices"]["logs"].value("path", ""), std::string{"/var/logs"});
+        CHECK(lxd.get("/1.0/instances/web1")["devices"].contains("eth0"));
         CHECK_THROWS_AS((void) lxd.remove_device("none", "data"), sc::lxd::error);
     }
 

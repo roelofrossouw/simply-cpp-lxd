@@ -176,6 +176,17 @@ namespace sc::lxd {
         std::optional<nlohmann::json> remove_device(std::string_view instance, std::string_view device, std::string_view project = "default",
                                                     std::chrono::seconds limit = std::chrono::minutes{1}) const;
 
+        // Sets a device in an instance's own config to properties (added, or replacing the one there),
+        // as set_config() changes it: what its own config had under that name before (nothing when
+        // it had none), or nothing changed when it already had exactly that. A running container
+        // takes most changes at once; LXD refuses those it can't make live (400). Since 1.7.0.
+        struct device_change {
+            bool changed = false;
+            std::optional<nlohmann::json> before;
+        };
+        device_change set_device(std::string_view instance, std::string_view device, const nlohmann::json &properties,
+                                 std::string_view project = "default", std::chrono::seconds limit = std::chrono::minutes{1}) const;
+
         // Removes an instance, stopping it first (forced) when it runs; false when there's none.
         bool remove(std::string_view instance, std::string_view project = "default",
                     std::chrono::seconds limit = std::chrono::minutes{2}) const;

@@ -343,6 +343,22 @@ namespace sc::lxd {
         return removed;
     }
 
+    client::device_change client::set_device(const std::string_view instance, const std::string_view device, const nlohmann::json &properties,
+                                             const std::string_view project, const std::chrono::seconds limit) const {
+        device_change out;
+        out.changed = update(instance, project, limit, "setting " + std::string{device} + " of " + std::string{instance}, [&](nlohmann::json &body) {
+            out.before.reset();
+            const auto found = body["devices"].find(std::string{device});
+            if (found != body["devices"].end()) {
+                out.before = *found;
+                if (*found == properties) return false;
+            }
+            body["devices"][std::string{device}] = properties;
+            return true;
+        });
+        return out;
+    }
+
     bool client::remove(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit) const {
         const auto there = find(instance, project);
         if (!there) return false;
