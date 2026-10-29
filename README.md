@@ -58,7 +58,9 @@ lxd.remove("web3");                                                             
 
 `get()` returns the answer's `metadata`. `exec()` throws `sc::lxd::error` when LXD refuses (an
 instance that isn't running: 400) or the command outlasts its limit (408). Many execs in quick
-succession load a cluster's database, and every other request waits on it: space them out. LXD saying no (an unknown instance, a project the
+succession load a cluster's database, and every other request waits on it: space them out. An
+exec takes four requests one after another (since 1.7.1 its stderr is read and removed beside its
+stdout, not after it). LXD saying no (an unknown instance, a project the
 certificate may not see) throws `sc::lxd::error` with its status; no member answering throws
 `sc::lxd::unreachable`, naming each member's reason.
 

@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <future>
 #include <utility>
 
 namespace sc::lxd {
@@ -251,18 +252,22 @@ namespace sc::lxd {
         const auto details = ended.value("metadata", nlohmann::json::object());
         out.status = details.value("return", -1);
         const auto output = details.value("output", nlohmann::json::object());
-        const auto collect = [&](const char *stream, std::string &into) {
+        // Each recorded stream read and removed, stderr's beside stdout's: a busy cluster takes up to a
+        // second or two for each of these requests, so the exec waits for two of them, not four.
+        const auto collect = [this, &output](const char *stream) {
             const auto log = text_at(output, stream);
-            if (log.empty()) return;
-            into = request("GET", log, nullptr, true).body;
+            if (log.empty()) return std::string{};
+            auto body = request("GET", log, nullptr, true).body;
             try {
                 (void) metadata_of(request("DELETE", log));
             } catch (const std::exception &) {
                 // A log left behind is LXD's to clear (at the instance's next start); the result stands.
             }
+            return body;
         };
-        collect("1", out.out);
-        collect("2", out.err);
+        auto err = std::async(std::launch::async, collect, "2");
+        out.out = collect("1");
+        out.err = err.get();
         return out;
     }
 
