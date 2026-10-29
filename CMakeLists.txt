@@ -36,4 +36,5 @@ endif ()
 
 add_sc_example(sc-lxd-demo)
 
-package_sc_module(DEPENDS "simply-cpp (>= 1.25.0~)" DEV_DEPENDS "simply-cpp-dev (>= 1.25.0~)")
+# sc-core is built into the library and the demo, so the runtime package doesn't need simply-cpp.
+package_sc_module(DEV_DEPENDS "simply-cpp-dev (>= 1.25.0~)")
