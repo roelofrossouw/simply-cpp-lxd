@@ -235,6 +235,9 @@ namespace sc::lxd {
         nlohmann::json order{{"command", command}, {"wait-for-websocket", false}, {"interactive", false}, {"record-output", true}};
         order["environment"] = nlohmann::json::object();
         for (const auto &[name, value]: options.environment) order["environment"][name] = value;
+        if (options.user) order["user"] = *options.user;
+        if (options.group) order["group"] = *options.group;
+        if (!options.folder.empty()) order["cwd"] = options.folder;
         const auto body = order.dump();
         const auto started = metadata_of(request("POST", "/1.0/instances/" + encoded(instance) + "/exec?project=" + encoded(options.project), &body));
         const auto id = text_at(started, "id");

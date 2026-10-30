@@ -100,6 +100,12 @@ namespace sc::lxd {
         std::chrono::seconds limit{60};
         // Its environment besides LXD's own (PATH, HOME, ...): {"LANG", "C.UTF-8"}.
         std::map<std::string, std::string> environment;
+        // Who it runs as, by number (id -u www-data in the container): none is root. LXD sets no HOME
+        // for another user: give it in environment.
+        std::optional<unsigned> user;
+        std::optional<unsigned> group;
+        // The folder it starts in; empty: LXD's own (root's home).
+        std::string folder;
     };
 
     // How a command ended, and what it wrote.

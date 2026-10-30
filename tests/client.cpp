@@ -140,6 +140,8 @@ int main() {
         CHECK_EQ(ran.out, std::string{"sh -c echo hi LANG=C.UTF-8\n"});
         CHECK_EQ(ran.err, std::string{"warned\n"});
         CHECK_EQ(lxd.exec("web1", {"fail"}).status, 3);
+        // As another user, in a folder: asked of LXD as user, group and cwd.
+        CHECK_EQ(lxd.exec("web1", {"id"}, {.user = 48, .group = 48, .folder = "/home/test"}).out, std::string{"id user:48 group:48 cwd:/home/test\n"});
         // The stand-in forgets a log once it's deleted: none is left.
         CHECK_THROWS_AS((void) lxd.get("/1.0/instances/web1/logs/exec-output/none"), sc::lxd::error);
         try {

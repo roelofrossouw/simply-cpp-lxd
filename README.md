@@ -46,6 +46,8 @@ lxd.delete_file("web1", "/etc/motd");                                           
 const auto listed = lxd.exec("web1", {"sh", "-c", "apt list --upgradable"},
                              {.limit = std::chrono::minutes{5}, .environment = {{"LANG", "C.UTF-8"}}});
 if (listed.status == 0) std::cout << listed.out;
+// As another user (by number) in a folder; LXD sets no HOME for it.
+lxd.exec("web1", {"git", "status"}, {.environment = {{"HOME", "/var/www"}}, .user = 33, .group = 33, .folder = "/var/www/html"});
 
 lxd.create({{"name", "web3"}, {"type", "container"}, {"profiles", {"default"}},
             {"source", {{"type", "image"}, {"protocol", "simplestreams"},

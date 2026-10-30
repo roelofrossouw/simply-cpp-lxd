@@ -144,6 +144,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             text = " ".join(command)
             for name, value in sorted(order.get("environment", {}).items()):
                 text += " " + name + "=" + value
+            for key in ("user", "group", "cwd"):
+                if key in order:
+                    text += " " + key + ":" + str(order[key])
             logs[base + ".stdout"] = (text + "\n").encode()
             logs[base + ".stderr"] = b"warned\n"
             code = 3 if any("fail" in part for part in command) else 0
