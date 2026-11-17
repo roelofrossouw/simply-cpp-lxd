@@ -1,6 +1,6 @@
 // sc::lxd::client against a stand-in LXD member (resource/lxd_server.py, HTTPS wanting a client
 // certificate): members tried in turn, LXD's errors, an unknown instance, nobody answering.
-#include <sc_lxd.h>
+#include <sc/lxd/sc_lxd.h>
 
 #include "sc_test.h"
 

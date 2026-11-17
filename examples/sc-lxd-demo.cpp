@@ -2,9 +2,9 @@
 //     sc-lxd-demo CERT KEY SERVER_CERT MEMBER_URL...
 //     sc-lxd-demo --file web1:/etc/hostname CERT KEY SERVER_CERT MEMBER_URL...
 //     sc-lxd-demo --exec web1 --command "uptime" CERT KEY SERVER_CERT MEMBER_URL...
-#include <sc_lxd.h>
+#include <sc/lxd/sc_lxd.h>
 
-#include <params.h>
+#include <sc/core/params.h>
 
 #include <iomanip>
 #include <iostream>

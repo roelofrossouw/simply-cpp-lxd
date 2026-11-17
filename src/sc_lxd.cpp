@@ -1,6 +1,6 @@
-#include "sc_lxd.h"
+#include <sc/lxd/sc_lxd.h>
 
-#include <rest.h>
+#include <sc/http/rest.h>
 
 #include <cctype>
 #include <cstdio>

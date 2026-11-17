@@ -1,5 +1,5 @@
 // sc::lxd::instance from LXD's JSON: state, addresses, usage; what's missing stays empty.
-#include <sc_lxd.h>
+#include <sc/lxd/sc_lxd.h>
 
 #include "sc_test.h"
 
