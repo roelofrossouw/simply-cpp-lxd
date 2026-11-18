@@ -30,7 +30,7 @@ client certificate.
   `set_device()` (since 1.7.0) adds or replaces one.
 
 ```cpp
-#include <sc/lxd/sc_lxd.h>
+#include <sc/lxd/lxd.h>
 
 sc::lxd::client lxd{{"https://10.0.100.3:8443", "https://10.0.105.1:8443"},
                     {.certificate = "/etc/agent/lxd.crt", .key = "/etc/agent/lxd.key",

@@ -1,6 +1,6 @@
-#include <sc/lxd/sc_lxd.h>
+#include <sc/lxd/lxd.h>
 
-#include <sc/http/rest.h>
+#include <sc/http/client.h>
 
 #include <cctype>
 #include <cstdio>
@@ -97,7 +97,7 @@ namespace sc::lxd {
         std::string reasons;
         for (std::size_t tried = 0; tried < members_.size(); ++tried) {
             const std::size_t index = (first + tried) % members_.size();
-            sc::rest call{members_[index] + std::string{path}};
+            sc::http::client call{members_[index] + std::string{path}};
             call.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());
             if (!credentials_.server_certificate.empty()) call.trust(credentials_.server_certificate.string()).verify_host(false);
             if (!credentials_.pinned_key.empty()) call.pinned_public_key(credentials_.pinned_key);

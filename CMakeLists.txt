@@ -10,14 +10,14 @@ message(STATUS "SimplyCPP ${SC_MODULE} Version: ${SC_VERSION}")
 
 # nlohmann/json and the rest of sc-core.
 find_or_install_package(sc-core simply-cpp-dev simply-cpp 3.0.0)
-# sc::rest (rest.h), sc-core's until 2.0.0.
-find_or_install_package(sc-http simply-cpp-http-dev simply-cpp-http 2.0.0)
+# sc::http::client (<sc/http/client.h>; sc::rest, in sc-core until 2.0.0).
+find_or_install_package(sc-http simply-cpp-http-dev simply-cpp-http 3.0.0)
 
 set(SOURCE_OBJECTS)
 set(SOURCE_LIBRARIES)
 set(SOURCE_LINK_LIBRARIES)
 
-add_sc_object(sc_lxd
+add_sc_object(lxd
         LINK_LIBRARIES sc::sc-core sc::sc-http-shared
         PUBLIC_LINK_LIBRARIES sc::sc-core sc::sc-http-shared)
 
@@ -39,4 +39,4 @@ add_sc_example(sc-lxd-demo)
 
 # sc-core is built into the library and the demo, so the runtime package doesn't need simply-cpp;
 # sc-http's shared library it does.
-package_sc_module(DEPENDS "simply-cpp-http (>= 2.0.0~)" DEV_DEPENDS "simply-cpp-dev (>= 3.0.0~)" "simply-cpp-http-dev (>= 2.0.0~)")
+package_sc_module(DEPENDS "simply-cpp-http (>= 3.0.0~)" DEV_DEPENDS "simply-cpp-dev (>= 3.0.0~)" "simply-cpp-http-dev (>= 3.0.0~)")
