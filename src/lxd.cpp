@@ -40,6 +40,60 @@ namespace sc::lxd {
             const auto found = object.find(key);
             return found != object.end() && found->is_string() ? found->get<std::string>() : std::string{};
         }
+
+        // %XX decoded (a name LXD gave in a URL).
+        std::string decoded(const std::string_view text) {
+            std::string out;
+            for (std::size_t i = 0; i < text.size(); ++i) {
+                if (text[i] == '%' && i + 2 < text.size() && std::isxdigit(static_cast<unsigned char>(text[i + 1])) &&
+                    std::isxdigit(static_cast<unsigned char>(text[i + 2]))) {
+                    out += static_cast<char>(std::stoi(std::string{text.substr(i + 1, 2)}, nullptr, 16));
+                    i += 2;
+                } else {
+                    out += text[i];
+                }
+            }
+            return out;
+        }
+
+        constexpr std::string_view instances_prefix = "/1.0/instances";
+
+        // A query parameter's value ("project" in "a=1&project=x"), decoded; "" when it isn't there.
+        std::string parameter(const std::string_view query, const std::string_view name) {
+            std::size_t at = 0;
+            while (at <= query.size()) {
+                const auto end = std::min(query.find('&', at), query.size());
+                const auto pair = query.substr(at, end - at);
+                if (pair.size() > name.size() && pair.substr(0, name.size()) == name && pair[name.size()] == '=')
+                    return decoded(pair.substr(name.size() + 1));
+                at = end + 1;
+            }
+            return {};
+        }
+
+        // An instance's name and project from a path or URL LXD gives ("/1.0/instances/web1?project=x",
+        // "/1.0/instances/web1/files?path=..&project=x"); nothing for any other path.
+        std::optional<std::pair<std::string, std::string>> instance_of(const std::string_view path) {
+            const std::string_view prefix = "/1.0/instances/";
+            if (!path.starts_with(prefix)) return std::nullopt;
+            const auto rest = path.substr(prefix.size());
+            const auto name_end = std::min(rest.find_first_of("/?"), rest.size());
+            if (name_end == 0) return std::nullopt;
+            const auto query_at = rest.find('?');
+            auto project = query_at == std::string_view::npos ? std::string{} : parameter(rest.substr(query_at + 1), "project");
+            if (project.empty()) project = "default";
+            return std::pair{decoded(rest.substr(0, name_end)), project};
+        }
+
+        // The instances' list: /1.0/instances or /1.0/instances?...
+        bool instances_list(const std::string_view path) {
+            return path == instances_prefix || (path.starts_with(instances_prefix) && path.size() > instances_prefix.size() &&
+                                                path[instances_prefix.size()] == '?');
+        }
+
+        std::string key_of(const std::string_view project, const std::string_view name) {
+            return std::string{project.empty() ? std::string_view{"default"} : project} + "/" + std::string{name};
+        }
     }
 
     instance instance::from_json(const nlohmann::json &metadata) {
@@ -84,6 +138,135 @@ namespace sc::lxd {
             while (member.ends_with('/')) member.pop_back();
         if (credentials_.certificate.empty() || credentials_.key.empty())
             throw std::invalid_argument("sc::lxd::client: a client certificate and its key are needed");
+    }
+
+    client::client(std::vector<std::string> members, credentials how, std::vector<standalone> hosts, const std::chrono::seconds timeout)
+        : client(std::move(members), std::move(how), timeout) {
+        std::set<std::string> names;
+        for (auto &host: hosts) {
+            if (host.name.empty()) throw std::invalid_argument("sc::lxd::client: a standalone host without a name");
+            if (!names.insert(host.name).second) throw std::invalid_argument("sc::lxd::client: standalone host " + host.name + " twice");
+            if (host.urls.empty()) throw std::invalid_argument("sc::lxd::client: standalone host " + host.name + " has no URL");
+            standalone_.push_back({host.name, std::make_unique<client>(std::move(host.urls), std::move(host.how), timeout), {}, {}});
+        }
+    }
+
+    std::vector<std::string> client::hosts() const {
+        std::vector<std::string> out;
+        for (const auto &each: standalone_) out.push_back(each.name);
+        return out;
+    }
+
+    const client *client::standalone_named(const std::string_view host) const {
+        for (const auto &each: standalone_)
+            if (each.name == host) return each.lxd.get();
+        return nullptr;
+    }
+
+    void client::place(const std::string_view project, const std::string_view name, const std::string_view host) const {
+        if (standalone_.empty()) return;
+        const std::lock_guard lock{route_mutex_};
+        if (standalone_named(host)) pinned_[key_of(project, name)] = std::string{host};
+        else pinned_.erase(key_of(project, name));
+    }
+
+    void client::refresh_listings() const {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto &each: standalone_) {
+            {
+                const std::lock_guard lock{route_mutex_};
+                if (now < each.next_listing) continue;
+                // Taken now, so another call doesn't read it too meanwhile.
+                each.next_listing = now + std::chrono::seconds{30};
+            }
+            std::set<std::string> seen;
+            bool answered = false;
+            try {
+                const auto listed = each.lxd->get("/1.0/instances?all-projects=true");
+                if (listed.is_array())
+                    for (const auto &url: listed)
+                        if (url.is_string())
+                            if (const auto found = instance_of(url.get<std::string>())) seen.insert(key_of(found->second, found->first));
+                answered = true;
+            } catch (const std::exception &) {
+                // Its last listing stands; it's tried again in 5 minutes, not every call meanwhile.
+            }
+            const std::lock_guard lock{route_mutex_};
+            if (answered) each.seen = std::move(seen);
+            else each.next_listing = now + std::chrono::minutes{5};
+        }
+    }
+
+    const client *client::route(const std::string_view name, const std::string_view project) const {
+        if (standalone_.empty()) return nullptr;
+        const auto key = key_of(project, name);
+        {
+            const std::lock_guard lock{route_mutex_};
+            if (const auto pin = pinned_.find(key); pin != pinned_.end()) return standalone_named(pin->second);
+        }
+        refresh_listings();
+        const std::lock_guard lock{route_mutex_};
+        for (const auto &each: standalone_)
+            if (each.seen.contains(key)) return each.lxd.get();
+        return nullptr;
+    }
+
+    std::string client::host_of(const std::string_view name, const std::string_view project) const {
+        const auto *found = route(name, project);
+        for (const auto &each: standalone_)
+            if (each.lxd.get() == found) return each.name;
+        return {};
+    }
+
+    std::set<std::string> client::on_host(const std::string_view host) const {
+        std::set<std::string> out;
+        const std::lock_guard lock{route_mutex_};
+        for (const auto &[key, pinned_host]: pinned_)
+            if (pinned_host == host) out.insert(key);
+        for (const auto &each: standalone_)
+            if (each.name == host) out.insert(each.seen.begin(), each.seen.end());
+        return out;
+    }
+
+    nlohmann::json client::get_on(const std::string_view host, const std::string_view path) const {
+        if (const auto *other = standalone_named(host)) return other->get(path);
+        return metadata_of(request("GET", path));
+    }
+
+    listing client::list(const bool all_projects) const {
+        listing out;
+        const auto listed = metadata_of(request("GET", all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2"));
+        std::vector<instance> cluster;
+        if (listed.is_array())
+            for (const auto &each: listed) cluster.push_back(instance::from_json(each));
+        std::set<std::string> elsewhere;
+        for (auto &each: standalone_) {
+            std::vector<instance> theirs;
+            try {
+                theirs = each.lxd->instances(all_projects);
+            } catch (const std::exception &) {
+                out.unanswered.push_back(each.name);
+                continue;
+            }
+            std::set<std::string> seen;
+            for (auto &one: theirs) {
+                one.location = each.name; // LXD says "none" outside a cluster
+                if (one.project.empty()) one.project = "default";
+                seen.insert(key_of(one.project, one.name));
+            }
+            {
+                const std::lock_guard lock{route_mutex_};
+                // A listing of the default project only doesn't say what the others have.
+                if (all_projects) each.seen = seen;
+                else each.seen.insert(seen.begin(), seen.end());
+                each.next_listing = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+            }
+            elsewhere.insert(seen.begin(), seen.end());
+            for (auto &one: theirs) out.instances.push_back(std::move(one));
+        }
+        for (auto &one: cluster)
+            if (!elsewhere.contains(key_of(one.project, one.name))) out.instances.push_back(std::move(one));
+        return out;
     }
 
     client::response client::request(const char *method, const std::string_view path, const std::string *body, const bool raw,
@@ -144,18 +327,75 @@ namespace sc::lxd {
         return parsed.value("metadata", nlohmann::json{});
     }
 
-    nlohmann::json client::get(const std::string_view path) const { return metadata_of(request("GET", path)); }
+    nlohmann::json client::get(const std::string_view path) const {
+        if (!standalone_.empty()) {
+            if (const auto found = instance_of(path)) {
+                if (const auto *other = route(found->first, found->second)) {
+                    auto out = other->get(path);
+                    if (out.is_object() && out.contains("location"))
+                        for (const auto &each: standalone_)
+                            if (each.lxd.get() == other) out["location"] = each.name;
+                    return out;
+                }
+            } else if (instances_list(path)) {
+                auto out = metadata_of(request("GET", path));
+                if (!out.is_array()) return out;
+                std::set<std::string> elsewhere;
+                nlohmann::json theirs = nlohmann::json::array();
+                for (const auto &each: standalone_) {
+                    nlohmann::json listed;
+                    try {
+                        listed = each.lxd->get(path);
+                    } catch (const std::exception &) {
+                        continue; // a standalone host that doesn't answer: the others' list stands
+                    }
+                    if (!listed.is_array()) continue;
+                    for (auto &one: listed) {
+                        if (one.is_object()) {
+                            one["location"] = each.name;
+                            elsewhere.insert(key_of(text_at(one, "project"), text_at(one, "name")));
+                        } else if (one.is_string()) {
+                            if (const auto found = instance_of(one.get<std::string>())) elsewhere.insert(key_of(found->second, found->first));
+                        }
+                        theirs.push_back(std::move(one));
+                    }
+                }
+                nlohmann::json merged = nlohmann::json::array();
+                for (auto &one: out) {
+                    std::string key;
+                    if (one.is_object()) key = key_of(text_at(one, "project"), text_at(one, "name"));
+                    else if (one.is_string())
+                        if (const auto found = instance_of(one.get<std::string>())) key = key_of(found->second, found->first);
+                    if (key.empty() || !elsewhere.contains(key)) merged.push_back(std::move(one));
+                }
+                for (auto &one: theirs) merged.push_back(std::move(one));
+                return merged;
+            }
+        }
+        return metadata_of(request("GET", path));
+    }
 
     std::vector<instance> client::instances(const bool all_projects) const {
-        const auto listed = get(all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2");
-        std::vector<instance> out;
-        if (!listed.is_array()) return out;
-        out.reserve(listed.size());
-        for (const auto &each: listed) out.push_back(instance::from_json(each));
-        return out;
+        if (standalone_.empty()) {
+            const auto listed = get(all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2");
+            std::vector<instance> out;
+            if (!listed.is_array()) return out;
+            out.reserve(listed.size());
+            for (const auto &each: listed) out.push_back(instance::from_json(each));
+            return out;
+        }
+        return list(all_projects).instances;
     }
 
     std::optional<instance> client::find(const std::string_view name, const std::string_view project) const {
+        if (const auto *other = route(name, project)) {
+            auto found = other->find(name, project);
+            if (found) {
+                for (const auto &each: standalone_)
+                    if (each.lxd.get() == other) found->location = each.name;
+            }
+            return found;
+        }
         try {
             // recursion=1 on one instance brings its state along (InstanceFull).
             return instance::from_json(get("/1.0/instances/" + encoded(name) + "?recursion=1&project=" + encoded(project)));
@@ -166,6 +406,7 @@ namespace sc::lxd {
     }
 
     std::optional<file> client::read_file(const std::string_view instance, const std::string_view path, const std::string_view project) const {
+        if (const auto *other = route(instance, project)) return other->read_file(instance, path, project);
         const auto answer = request("GET", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project),
                                     nullptr, true);
         const auto header = [&](const char *name) {
@@ -206,6 +447,7 @@ namespace sc::lxd {
     }
 
     void client::write_file(const std::string_view instance, const std::string_view path, const file &what, const std::string_view project) const {
+        if (const auto *other = route(instance, project)) return other->write_file(instance, path, what, project);
         if (what.type != "file" && what.type != "symlink" && what.type != "directory")
             throw std::invalid_argument("sc::lxd::client::write_file: a type of file, symlink or directory, not \"" + what.type + "\"");
         char mode[8];
@@ -221,6 +463,7 @@ namespace sc::lxd {
     }
 
     bool client::delete_file(const std::string_view instance, const std::string_view path, const std::string_view project) const {
+        if (const auto *other = route(instance, project)) return other->delete_file(instance, path, project);
         try {
             (void) metadata_of(request("DELETE", "/1.0/instances/" + encoded(instance) + "/files?path=" + encoded(path) + "&project=" + encoded(project)));
             return true;
@@ -231,6 +474,7 @@ namespace sc::lxd {
     }
 
     exec_result client::exec(const std::string_view instance, const std::vector<std::string> &command, const exec_options &options) const {
+        if (const auto *other = route(instance, options.project)) return other->exec(instance, command, options);
         if (command.empty()) throw std::invalid_argument("sc::lxd::client::exec: no command");
         nlohmann::json order{{"command", command}, {"wait-for-websocket", false}, {"interactive", false}, {"record-output", true}};
         order["environment"] = nlohmann::json::object();
@@ -288,8 +532,13 @@ namespace sc::lxd {
     }
 
     void client::create(const nlohmann::json &body, const std::string_view project, const std::string_view target, const std::chrono::seconds limit) const {
-        const auto text = body.dump();
         const auto name = body.value("name", std::string{});
+        if (const auto *other = standalone_named(target)) {
+            other->create(body, project, {}, limit);
+            place(project, name, target);
+            return;
+        }
+        const auto text = body.dump();
         const auto started = metadata_of(request("POST", "/1.0/instances?project=" + encoded(project) +
                                                              (target.empty() ? std::string{} : "&target=" + encoded(target)), &text));
         wait_for(started, project, limit, "making " + name);
@@ -297,6 +546,7 @@ namespace sc::lxd {
 
     void client::change_state(const std::string_view instance, const std::string_view action, const std::string_view project, const bool force,
                               const std::chrono::seconds limit) const {
+        if (const auto *other = route(instance, project)) return other->change_state(instance, action, project, force, limit);
         const auto text = nlohmann::json{{"action", action}, {"timeout", static_cast<int>(limit.count())}, {"force", force}}.dump();
         const auto started = metadata_of(request("PUT", "/1.0/instances/" + encoded(instance) + "/state?project=" + encoded(project), &text));
         wait_for(started, project, limit, std::string{action} + " " + std::string{instance});
@@ -304,6 +554,7 @@ namespace sc::lxd {
 
     bool client::update(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit, const std::string &what,
                         const std::function<bool(nlohmann::json &)> &change) const {
+        if (const auto *other = route(instance, project)) return other->update(instance, project, limit, what, change);
         const auto path = "/1.0/instances/" + encoded(instance) + "?project=" + encoded(project);
         for (int attempt = 1;; ++attempt) {
             const auto read = request("GET", path);
@@ -368,6 +619,13 @@ namespace sc::lxd {
     }
 
     bool client::remove(const std::string_view instance, const std::string_view project, const std::chrono::seconds limit) const {
+        if (const auto *other = route(instance, project)) {
+            const bool removed = other->remove(instance, project, limit);
+            const std::lock_guard lock{route_mutex_};
+            for (auto &each: standalone_)
+                if (each.lxd.get() == other) each.seen.erase(key_of(project, instance));
+            return removed;
+        }
         const auto there = find(instance, project);
         if (!there) return false;
         if (there->status_code != 102) change_state(instance, "stop", project, true, limit); // 102: Stopped

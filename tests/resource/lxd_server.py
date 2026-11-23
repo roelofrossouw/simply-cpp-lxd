@@ -197,6 +197,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.ok(operations[id]) if id in operations else self.missing()
         if url.path == "/1.0/instances" and query.get("recursion") == ["2"]:
             return self.answer(200, {"type": "sync", "status": "Success", "status_code": 200, "metadata": instances})
+        if url.path == "/1.0/instances" and not query.get("recursion"):
+            # recursion 0: the instances' URLs
+            urls = ["/1.0/instances/" + urllib.parse.quote(each["name"]) + "?project=" + each["project"] for each in instances]
+            return self.answer(200, {"type": "sync", "status": "Success", "status_code": 200, "metadata": urls})
         if url.path.startswith("/1.0/instances/"):
             name = urllib.parse.unquote(url.path[len("/1.0/instances/"):])
             for each in instances:

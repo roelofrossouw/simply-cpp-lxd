@@ -12,6 +12,18 @@
 //     lxd.write_file("web1", "/etc/motd", {.type = "file", .content = "Hello\n", .mode = 0644});
 //     const auto listed = lxd.exec("web1", {"dpkg-query", "-W"});
 //     if (listed.status == 0) std::cout << listed.out;
+//
+// Standalone servers beside the cluster (since 4.0.0): hosts that aren't members, each with its own
+// URL and certificate. A call about an instance goes to the server that has it (place() pins it, else
+// the servers' own listings, read again at most every 30 s); create() with a standalone host as its
+// target makes it there; instances() lists the cluster's and theirs, a standalone one's location being
+// the host's name. Without standalone servers the client is exactly the cluster's.
+//
+//     sc::lxd::client lxd{{"https://10.0.100.3:8443"}, {.certificate = "agent.crt", .key = "agent.key", .server_certificate = "cluster.crt"},
+//                         {{.name = "hv3", .urls = {"https://192.0.2.5:8443"},
+//                           .how = {.certificate = "agent.crt", .key = "agent.key", .server_certificate = "hv3.crt"}}}};
+//     lxd.place("default", "mail3", "hv3");
+//     lxd.exec("mail3", {"postqueue", "-p"}); // to hv3
 
 #include <nlohmann/json.hpp>
 
@@ -23,6 +35,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -115,18 +128,64 @@ namespace sc::lxd {
         std::string err;
     };
 
+    // A standalone LXD server beside the cluster, one that isn't a member (since 4.0.0).
+    struct standalone {
+        std::string name;              // the host's name: its instances' location, and create()'s target for it
+        std::vector<std::string> urls; // its URLs, tried in turn
+        credentials how;               // usually the cluster's client certificate, with this server's own certificate
+    };
+
+    // What list() found (since 4.0.0).
+    struct listing {
+        std::vector<instance> instances;
+        // Standalone hosts that didn't answer: their instances aren't in it.
+        std::vector<std::string> unanswered;
+    };
+
     class client {
     public:
         // members: the cluster's member URLs ("https://10.0.100.3:8443"), tried in this order
         // after the one that answered last. timeout: a request's limit, per member.
         client(std::vector<std::string> members, credentials how, std::chrono::seconds timeout = std::chrono::seconds{10});
 
+        // The cluster and standalone servers beside it (since 4.0.0): their names unique, not empty,
+        // each with a URL. Throws std::invalid_argument otherwise.
+        client(std::vector<std::string> members, credentials how, std::vector<standalone> hosts,
+               std::chrono::seconds timeout = std::chrono::seconds{10});
+
+        // The standalone hosts' names, as given (since 4.0.0).
+        [[nodiscard]] std::vector<std::string> hosts() const;
+
+        // Pins an instance to a standalone host (its calls go there, whatever the listings say), or to
+        // the cluster with any other host name or none (since 4.0.0).
+        void place(std::string_view project, std::string_view name, std::string_view host) const;
+
+        // The standalone host an instance's calls go to; "" for the cluster (since 4.0.0). May read the
+        // standalone servers' listings (at most every 30 s; a host that didn't answer is tried again
+        // after 5 minutes, its last listing kept meanwhile).
+        [[nodiscard]] std::string host_of(std::string_view name, std::string_view project = "default") const;
+
+        // "project/name" of the instances pinned to a standalone host or last listed there (since 4.0.0).
+        [[nodiscard]] std::set<std::string> on_host(std::string_view host) const;
+
+        // The cluster's instances and each standalone server's (their location the host's name), every
+        // project's or the default one's (since 4.0.0). Throws as get() does when the cluster doesn't
+        // answer; a standalone host that doesn't is left out and named in unanswered. An instance a
+        // standalone server lists isn't taken from the cluster's listing too.
+        [[nodiscard]] listing list(bool all_projects = true) const;
+
+        // GET path on a standalone host (by its name), or the cluster's for any other name (since 4.0.0).
+        [[nodiscard]] nlohmann::json get_on(std::string_view host, std::string_view path) const;
+
         // The metadata of GET path ("/1.0/instances?recursion=2"). Throws lxd::error for an
         // answer of LXD's saying no, lxd::unreachable when no member answers (or one answers with
-        // what isn't LXD's JSON).
+        // what isn't LXD's JSON). With standalone servers: /1.0/instances/<name>... goes where that
+        // instance is; the instances' list (/1.0/instances?...) is the cluster's and each answering
+        // standalone server's together (an object's location their host's name); anything else is
+        // the cluster's.
         [[nodiscard]] nlohmann::json get(std::string_view path) const;
 
-        // Every instance with its state, of every project (or the default one only).
+        // Every instance with its state, of every project (or the default one only): list()'s.
         [[nodiscard]] std::vector<instance> instances(bool all_projects = true) const;
 
         // One instance with its state; nothing when there's no such instance.
@@ -155,7 +214,8 @@ namespace sc::lxd {
                                        const exec_options &options = {}) const;
 
         // Makes an instance: POST /1.0/instances with body as LXD takes it (name, type, source,
-        // profiles, config, devices), on the cluster member target (empty: LXD's choice), and
+        // profiles, config, devices), on the cluster member target (empty: LXD's choice; a
+        // standalone host's name: on that server, and pinned to it), and
         // waits until it's made, an image's download included, or limit passes. Throws lxd::error
         // when LXD refuses (409: an instance of that name exists) or making it fails (500), 408
         // when it's still going at the limit.
@@ -227,10 +287,27 @@ namespace sc::lxd {
         bool update(std::string_view instance, std::string_view project, std::chrono::seconds limit, const std::string &what,
                     const std::function<bool(nlohmann::json &)> &change) const;
 
+        // The standalone server an instance is on, nullptr for the cluster.
+        [[nodiscard]] const client *route(std::string_view name, std::string_view project) const;
+        // The standalone servers' listings read again when it's time (each host's own pace).
+        void refresh_listings() const;
+        // The standalone server called host, nullptr when none is.
+        [[nodiscard]] const client *standalone_named(std::string_view host) const;
+
         std::vector<std::string> members_;
         credentials credentials_;
         std::chrono::seconds timeout_;
         mutable std::mutex mutex_;
         mutable std::size_t answered_ = 0; // members_' index of the member that answered last
+
+        struct remote {
+            std::string name;
+            std::unique_ptr<client> lxd;
+            std::set<std::string> seen;                          // "project/name" its last listing had
+            std::chrono::steady_clock::time_point next_listing{}; // when it's read again
+        };
+        mutable std::vector<remote> standalone_;                   // guarded by route_mutex_ (seen, next_listing)
+        mutable std::map<std::string, std::string> pinned_;        // "project/name" -> host
+        mutable std::mutex route_mutex_;
     };
 }

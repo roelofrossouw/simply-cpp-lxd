@@ -28,6 +28,14 @@ client certificate.
   again when the instance changed meanwhile). 400 for a value LXD refuses. `remove_device()`
   (since 1.6.0) takes a device out of an instance's own config the same way and gives what it was;
   `set_device()` (since 1.7.0) adds or replaces one.
+- **Standalone servers beside the cluster** (since 4.0.0). A host that isn't a member, with its own
+  URL and certificate, given by name: a call about an instance goes to the server that has it (pinned
+  with `place()`, else as the servers' own listings say, read again at most every 30 s), `create()`
+  with the host's name as its target makes the instance there, and `instances()` lists the cluster's
+  and theirs, a standalone instance's location being the host's name. `list()` also names a standalone
+  host that didn't answer (its instances are left out, not the whole listing); its pinned instances'
+  calls fail rather than go to the cluster. Without standalone servers the client is the cluster's
+  alone, exactly as before.
 
 ```cpp
 #include <sc/lxd/lxd.h>
@@ -66,6 +74,18 @@ stdout, not after it). LXD saying no (an unknown instance, a project the
 certificate may not see) throws `sc::lxd::error` with its status; no member answering throws
 `sc::lxd::unreachable`, naming each member's reason.
 
+With a standalone server (a host that left the cluster, say), the same client certificate is
+trusted there too (`lxc config trust add` on it), and its own certificate is given:
+
+```cpp
+sc::lxd::client lxd{{"https://10.0.100.3:8443"}, {.certificate = "lxd.crt", .key = "lxd.key", .server_certificate = "cluster.crt"},
+                    {{.name = "hv3", .urls = {"https://192.0.2.5:8443"},
+                      .how = {.certificate = "lxd.crt", .key = "lxd.key", .server_certificate = "hv3.crt"}}}};
+lxd.place("default", "mail3", "hv3");   // what a design says lives there
+lxd.exec("mail3", {"postqueue", "-p"}); // to hv3
+const auto all = lxd.list();            // all.unanswered: standalone hosts that didn't answer
+```
+
 A TLS client on LXD 5.21 can't be made read only (`--restricted --projects` only limits projects),
 so the key is as powerful as root on the cluster: keep it on the hosts that use it, mode 600.
 
@@ -87,6 +107,9 @@ In CMake: `find_package(sc-lxd)` and link `sc::sc-lxd` (or `sc::sc-lxd-shared`).
 (`tests/resource/lxd_server.py`, HTTPS wanting a client certificate, with openssl-made certificates):
 failover, an unknown instance, LXD's errors, files (a file, a symlink, a directory, a missing
 path), exec (output, exit status, refused, too slow), an unknown client and an untrusted server.
+`test-standalone` runs two (a cluster and a standalone host with its own certificate): listings
+merged, calls routed by listing and by pin, made and removed on the standalone host, one that
+doesn't answer.
 
 ## Licence
 
