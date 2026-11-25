@@ -12,7 +12,7 @@ operation for the image alias "broken"), started and stopped (PUT .../state: run
 address, or stopped), changed (PUT on the instance, with the ETag its GET gave in If-Match: 412
 when it's another; a limits.cpu that isn't a number refused, 400) and removed (DELETE, only a
 stopped one)."""
-import hashlib, http.server, json, ssl, sys, urllib.parse, uuid
+import hashlib, http.server, json, ssl, sys, threading, time, urllib.parse, uuid
 
 port, server_cert, server_key, client_cert, instances_file = sys.argv[1:6]
 instances = json.load(open(instances_file))
@@ -26,6 +26,9 @@ files = {
 }
 operations = {}  # id: the operation's metadata, as /wait gives it
 logs = {}        # path: content
+hits = {}        # path: how often it was asked (GET /1.0/test/hits?path=...)
+hosts = {}       # path: the Host it was last asked as (GET /1.0/test/host?path=...)
+hits_lock = threading.Lock()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -94,6 +97,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urllib.parse.urlsplit(self.path)
+        with hits_lock:
+            hosts[url.path] = self.headers.get("Host", "")
         data = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if url.path == "/1.0/instances/web1/files":
             # A write, as LXD takes one: the bytes, X-LXD-* for what it is. The folder must exist.
@@ -181,6 +186,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query)
+        with hits_lock:
+            hits[url.path] = hits.get(url.path, 0) + 1
+            hosts[url.path] = self.headers.get("Host", "")
+        if url.path == "/1.0/test/hits":
+            return self.ok(hits.get(query.get("path", [""])[0], 0))
+        if url.path == "/1.0/test/host":
+            return self.ok(hosts.get(query.get("path", [""])[0], ""))
+        if url.path == "/1.0/test/slow":
+            # Answers after 3 s: past a short limit, a read that timed out.
+            time.sleep(3)
+            return self.ok({})
+        if url.path == "/1.0":
+            return self.ok({"api_version": "1.0", "environment": {"server_name": "test"}})
+        if url.path == "/1.0/cluster/members":
+            # A cluster when its instances are on members (each member this server itself); else LXD's answer outside one.
+            located = sorted({each["location"] for each in instances if each["location"] not in ("", "none")})
+            if not located:
+                return self.answer(400, {"type": "error", "error": "Server isn't part of a cluster", "error_code": 400})
+            me = "https://127.0.0.1:" + str(server.server_address[1])
+            return self.ok([{"server_name": name, "url": me, "status": "Online"} for name in located])
+        if url.path.startswith("/1.0/instances/") and url.path.endswith("/state"):
+            found = self.instance(urllib.parse.unquote(url.path[len("/1.0/instances/"):-len("/state")]), query.get("project", ["default"])[0])
+            if not found:
+                return self.missing("Instance not found")
+            return self.ok(found.get("state") or {"status": found["status"], "status_code": found["status_code"]})
+        if url.path == "/1.0/instances" and query.get("recursion") == ["1"]:
+            return self.ok([{key: value for key, value in each.items() if key != "state"} for each in instances])
         if url.path == "/1.0/instances/web1/files":
             found = files.get(query.get("path", [""])[0])
             if not found:
@@ -219,7 +251,7 @@ context.load_cert_chain(server_cert, server_key)
 context.maximum_version = ssl.TLSVersion.TLSv1_2
 context.verify_mode = ssl.CERT_REQUIRED
 context.load_verify_locations(client_cert)
-server = http.server.HTTPServer(("127.0.0.1", int(port)), Handler)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
 server.socket = context.wrap_socket(server.socket, server_side=True)
 print("listening", server.server_address[1], flush=True)
 server.serve_forever()

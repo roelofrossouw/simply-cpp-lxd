@@ -13,6 +13,14 @@
 //     const auto listed = lxd.exec("web1", {"dpkg-query", "-W"});
 //     if (listed.status == 0) std::cout << listed.out;
 //
+// A cluster's calls go where the work is (since 6.0.0): a call about an instance (its state, files, exec,
+// config) and its operations go to the member that has it, so no member forwards them to another
+// (a member that kept forwarding listings to a slow one clogged that one's database for hours,
+// 2026-11-24). The members (GET /1.0/cluster/members) are read every 10 minutes and the instances'
+// members (a listing without state) every 5 minutes or when one isn't known; any other call goes to
+// the member that answered last. A call that times out reading its answer isn't asked of the other
+// members (each would hand it to the same busy member again); one that can't connect is.
+//
 // Standalone servers beside the cluster (since 4.0.0): hosts that aren't members, each with its own
 // URL and certificate. A call about an instance goes to the server that has it (place() pins it, else
 // the servers' own listings, read again at most every 30 s); create() with a standalone host as its
@@ -90,6 +98,9 @@ namespace sc::lxd {
         std::optional<std::int64_t> processes;    // how many run in it; nothing when it isn't running
         std::string created_at;   // RFC 3339, as LXD gives them
         std::string last_used_at;
+        // false when a listing couldn't read its state (its member too slow or away): status is then
+        // what the cluster's database last had, and the usage and addresses are empty, not zero (since 6.0.0).
+        bool state_read = true;
 
         // From an instance as GET /1.0/instances?recursion=2 lists it (with "state"); without
         // state, nothing that comes from it is filled in.
@@ -135,11 +146,24 @@ namespace sc::lxd {
         credentials how;               // usually the cluster's client certificate, with this server's own certificate
     };
 
+    // How a cluster member answered while list() read its instances' state (since 6.0.0): GET /1.0 on
+    // it, then its instances' state, at most 4 at a time; after one fails the rest aren't asked.
+    struct member_health {
+        std::string name, url;
+        double api_ms = -1;       // GET /1.0; -1 when it didn't answer
+        double state_max_ms = -1; // the slowest state read; -1 when none was read
+        int states_read = 0;
+        int states_skipped = 0;   // not read: one before failed, or the member isn't online
+        std::string error;        // why the first that failed did ("" none)
+    };
+
     // What list() found (since 4.0.0).
     struct listing {
         std::vector<instance> instances;
         // Standalone hosts that didn't answer: their instances aren't in it.
         std::vector<std::string> unanswered;
+        // A cluster's members, as they answered (since 6.0.0; empty outside a cluster).
+        std::vector<member_health> members;
     };
 
     class client {
@@ -171,7 +195,10 @@ namespace sc::lxd {
         // The cluster's instances and each standalone server's (their location the host's name), every
         // project's or the default one's (since 4.0.0). Throws as get() does when the cluster doesn't
         // answer; a standalone host that doesn't is left out and named in unanswered. An instance a
-        // standalone server lists isn't taken from the cluster's listing too.
+        // standalone server lists isn't taken from the cluster's listing too. A cluster's (since 6.0.0):
+        // the names listed (no member forwards that), each instance's state read on its own member
+        // (members side by side), how each member answered in members; an instance whose state
+        // wasn't read has state_read false.
         [[nodiscard]] listing list(bool all_projects = true) const;
 
         // GET path on a standalone host (by its name), or the cluster's for any other name (since 4.0.0).
@@ -185,7 +212,7 @@ namespace sc::lxd {
         // the cluster's.
         [[nodiscard]] nlohmann::json get(std::string_view path) const;
 
-        // Every instance with its state, of every project (or the default one only): list()'s.
+        // Every instance with its state, of every project (or the default one only): list()'s instances.
         [[nodiscard]] std::vector<instance> instances(bool all_projects = true) const;
 
         // One instance with its state; nothing when there's no such instance.
@@ -273,9 +300,27 @@ namespace sc::lxd {
         // one that answered last; lxd::unreachable when none answers. body: a POST of it.
         // headers: the request's own besides the certificate's (a file's X-LXD-*, its Content-Type).
         // method: GET, POST, PUT (body: what it sends) or DELETE.
+        // An instance's call and its operations go to its own member first (since 6.0.0). A read that
+        // timed out isn't asked of the others: lxd::unreachable at once.
         [[nodiscard]] response request(const char *method, std::string_view path, const std::string *body = nullptr,
                                        bool raw = false, std::chrono::seconds timeout = std::chrono::seconds{0},
                                        const std::map<std::string, std::string> *headers = nullptr) const;
+        // One try on one URL: the answer when it's LXD's, else why not (read_timeout: it timed out reading).
+        struct attempt {
+            std::optional<response> answer;
+            std::string why;
+            bool read_timeout = false;
+        };
+        [[nodiscard]] attempt try_on(const std::string &url, const char *method, std::string_view path, const std::string *body, bool raw,
+                                     std::chrono::seconds limit, const std::map<std::string, std::string> *headers) const;
+        // The member URL an instance's or operation's path goes to first; "" for any other path.
+        [[nodiscard]] std::string preferred(std::string_view path) const;
+        // The cluster's members (name -> URL) read when 10 minutes old; false outside a cluster.
+        bool read_members() const;
+        // The instances' members and what they are (a listing without state), when 5 minutes old or force.
+        void read_locations(bool all_projects, bool force) const;
+        // The cluster's instances with their state, read member by member (list()'s cluster part).
+        [[nodiscard]] std::vector<instance> cluster_instances(bool all_projects, std::vector<member_health> &health) const;
         // The metadata of LXD's JSON answer, or its lxd::error.
         [[nodiscard]] static nlohmann::json metadata_of(const response &answer);
         // Waits for a background operation LXD started (its metadata, with its id) to end;
@@ -309,5 +354,19 @@ namespace sc::lxd {
         mutable std::vector<remote> standalone_;                   // guarded by route_mutex_ (seen, next_listing)
         mutable std::map<std::string, std::string> pinned_;        // "project/name" -> host
         mutable std::mutex route_mutex_;
+
+        // Where a cluster's work is (since 6.0.0), guarded by placement_mutex_.
+        struct located {
+            std::string member;
+            nlohmann::json listed; // the instance as a listing without state has it
+        };
+        mutable std::mutex placement_mutex_;
+        mutable bool clustered_ = false;
+        mutable std::map<std::string, std::string> member_urls_;     // name -> URL
+        mutable std::map<std::string, std::string> member_status_;   // name -> "Online", ...
+        mutable std::chrono::steady_clock::time_point members_next_{};   // when the members are read again
+        mutable std::map<std::string, located> located_;             // "project/name" -> its member
+        mutable std::chrono::steady_clock::time_point locations_next_{}; // when the locations are read again
+        mutable std::map<std::string, std::string> operations_;      // an operation's id -> the URL that started it
     };
 }

@@ -5,7 +5,18 @@ cluster's instances and their state, files in them, commands run in them, over H
 client certificate.
 
 - **A cluster's members, in turn.** Give every member's URL; a request goes to the member that
-  answered last, then the others, so one member down (or rebuilding) changes nothing.
+  answered last, then the others, so one member down (or rebuilding) changes nothing. A request that
+  times out reading its answer isn't asked of the others (since 6.0.0): each would only hand the same
+  work to the same busy member.
+- **Calls go where the work is** (since 6.0.0). A call about an instance (its state, files, `exec()`,
+  config, devices) and its operations go to the member that has it, so no member forwards them to
+  another; a member that kept forwarding cluster-wide listings to a slow one clogged that one's
+  database for hours. The members (`/1.0/cluster/members`) are read every 10 minutes, the instances'
+  members (a listing without state) every 5 minutes or when one is new. `list()` takes the names (from
+  the database, nothing forwarded), then reads each instance's state on its own member, the members
+  side by side and 4 at a time on each; after a state read fails on a member its other instances
+  aren't asked this time (`state_read` false: status as the database had it, no usage), and
+  `listing::members` says how each member answered (`GET /1.0` and the slowest state read, in ms).
 - **Known both ways.** The client proves itself with a certificate the cluster trusts
   (`lxc config trust add`). The server is known by the cluster's own certificate (`lxc info`
   shows it as `environment.certificate`), trusted alone and not checked against the address, which

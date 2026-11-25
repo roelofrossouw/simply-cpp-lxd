@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <algorithm>
 #include <future>
 #include <utility>
 
@@ -235,10 +236,14 @@ namespace sc::lxd {
 
     listing client::list(const bool all_projects) const {
         listing out;
-        const auto listed = metadata_of(request("GET", all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2"));
         std::vector<instance> cluster;
-        if (listed.is_array())
-            for (const auto &each: listed) cluster.push_back(instance::from_json(each));
+        if (read_members()) {
+            cluster = cluster_instances(all_projects, out.members);
+        } else {
+            const auto listed = metadata_of(request("GET", all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2"));
+            if (listed.is_array())
+                for (const auto &each: listed) cluster.push_back(instance::from_json(each));
+        }
         std::set<std::string> elsewhere;
         for (auto &each: standalone_) {
             std::vector<instance> theirs;
@@ -269,6 +274,54 @@ namespace sc::lxd {
         return out;
     }
 
+    client::attempt client::try_on(const std::string &url, const char *method, const std::string_view path, const std::string *body, const bool raw,
+                                   const std::chrono::seconds limit, const std::map<std::string, std::string> *headers) const {
+        attempt out;
+        sc::http::client call{url + std::string{path}};
+        call.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());
+        if (!credentials_.server_certificate.empty()) call.trust(credentials_.server_certificate.string()).verify_host(false);
+        if (!credentials_.pinned_key.empty()) call.pinned_public_key(credentials_.pinned_key);
+        call.connect_timeout(std::min<long>(5, static_cast<long>(timeout_.count())));
+        call.timeout(static_cast<long>(limit.count()));
+        if (headers)
+            for (const auto &[name, value]: *headers) call.header(name, value);
+        const std::string_view verb{method};
+        auto answer_body = verb == "POST"     ? call.post(body ? *body : std::string{"{}"})
+                           : verb == "PUT"    ? call.put(body ? *body : std::string{"{}"})
+                           : verb == "DELETE" ? call.del()
+                                              : call.get();
+        const long status = call.status();
+        if (status == 0) {
+            out.why = call.error();
+            // curl's 28 after connecting ("Operation timed out after ..."; not "Connection timed out" or
+            // "Resolving timed out"): the member took the call and is still at it.
+            out.read_timeout = call.error_code() == 28 && out.why.find("Operation timed out") != std::string::npos;
+            return out;
+        }
+        if (status == 503) {
+            out.why = "503 (not ready)";
+            return out;
+        }
+        // LXD's own answer: its JSON, or (raw) a file's bytes, which come with X-LXD-type.
+        const auto parsed = nlohmann::json::parse(answer_body, nullptr, false);
+        const bool lxds = (parsed.is_object() && parsed.contains("type")) || (raw && (status == 200 || call.response_headers().contains("x-lxd-type")));
+        if (!lxds) {
+            out.why = "HTTP " + std::to_string(status) + ", not LXD's answer";
+            return out;
+        }
+        // An operation started here is waited for here.
+        if (parsed.is_object())
+            if (const auto operation = text_at(parsed, "operation"); operation.starts_with("/1.0/operations/")) {
+                auto id = operation.substr(std::string_view{"/1.0/operations/"}.size());
+                id = id.substr(0, id.find_first_of("/?"));
+                const std::lock_guard lock{placement_mutex_};
+                if (operations_.size() > 1000) operations_.clear();
+                operations_[id] = url;
+            }
+        out.answer = response{status, std::move(answer_body), call.response_headers()};
+        return out;
+    }
+
     client::response client::request(const char *method, const std::string_view path, const std::string *body, const bool raw,
                                      const std::chrono::seconds timeout, const std::map<std::string, std::string> *headers) const {
         std::size_t first;
@@ -277,46 +330,231 @@ namespace sc::lxd {
             first = answered_;
         }
         const auto limit = timeout.count() > 0 ? timeout : timeout_;
-        std::string reasons;
+        const auto prefer = preferred(path);
+        std::vector<std::pair<std::string, std::optional<std::size_t>>> order; // URL, members_' index (none: the preferred one)
+        if (!prefer.empty()) order.emplace_back(prefer, std::nullopt);
         for (std::size_t tried = 0; tried < members_.size(); ++tried) {
             const std::size_t index = (first + tried) % members_.size();
-            sc::http::client call{members_[index] + std::string{path}};
-            call.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());
-            if (!credentials_.server_certificate.empty()) call.trust(credentials_.server_certificate.string()).verify_host(false);
-            if (!credentials_.pinned_key.empty()) call.pinned_public_key(credentials_.pinned_key);
-            call.connect_timeout(std::min<long>(5, static_cast<long>(timeout_.count())));
-            call.timeout(static_cast<long>(limit.count()));
-            if (headers)
-                for (const auto &[name, value]: *headers) call.header(name, value);
-            const std::string_view verb{method};
-            auto answer_body = verb == "POST"     ? call.post(body ? *body : std::string{"{}"})
-                               : verb == "PUT"    ? call.put(body ? *body : std::string{"{}"})
-                               : verb == "DELETE" ? call.del()
-                                                  : call.get();
-            const long status = call.status();
-            std::string why;
-            if (status == 0) {
-                why = call.error();
-            } else if (status == 503) {
-                why = "503 (not ready)";
-            } else {
-                // LXD's own answer: its JSON, or (raw) a file's bytes, which come with X-LXD-type.
-                const auto parsed = nlohmann::json::parse(answer_body, nullptr, false);
-                const bool lxds = (parsed.is_object() && parsed.contains("type")) ||
-                                  (raw && (status == 200 || call.response_headers().contains("x-lxd-type")));
-                if (lxds) {
-                    {
-                        const std::lock_guard lock{mutex_};
-                        answered_ = index;
-                    }
-                    return {status, std::move(answer_body), call.response_headers()};
+            if (members_[index] != prefer) order.emplace_back(members_[index], index);
+        }
+        std::string reasons;
+        for (const auto &[url, index]: order) {
+            auto got = try_on(url, method, path, body, raw, limit, headers);
+            if (got.answer) {
+                if (index) {
+                    const std::lock_guard lock{mutex_};
+                    answered_ = *index;
                 }
-                why = "HTTP " + std::to_string(status) + ", not LXD's answer";
+                return std::move(*got.answer);
             }
             if (!reasons.empty()) reasons += "; ";
-            reasons += members_[index] + ": " + why;
+            reasons += url + ": " + got.why;
+            // Asking another member would only have it forward the same call to the same busy one.
+            if (got.read_timeout)
+                throw unreachable{"sc::lxd: " + std::string{method} + " " + std::string{path} + " timed out after " + std::to_string(limit.count()) +
+                                  " s (" + reasons + "; not asked of the other members)"};
         }
         throw unreachable{"sc::lxd: no member answered " + std::string{method} + " " + std::string{path} + " (" + reasons + ")"};
+    }
+
+    bool client::read_members() const {
+        const auto now = std::chrono::steady_clock::now();
+        {
+            const std::lock_guard lock{placement_mutex_};
+            if (now < members_next_) return clustered_;
+            members_next_ = now + std::chrono::minutes{10}; // taken now, so others don't read it meanwhile
+        }
+        std::map<std::string, std::string> urls, status;
+        bool clustered = false;
+        try {
+            const auto listed = metadata_of(request("GET", "/1.0/cluster/members?recursion=1"));
+            if (listed.is_array())
+                for (const auto &each: listed) {
+                    auto url = text_at(each, "url");
+                    while (url.ends_with('/')) url.pop_back();
+                    const auto name = text_at(each, "server_name");
+                    if (name.empty() || !url.starts_with("https://")) continue;
+                    urls[name] = url;
+                    status[name] = text_at(each, "status");
+                }
+            clustered = !urls.empty();
+        } catch (const lxd::error &) {
+            clustered = false; // LXD's no: not a cluster
+        } catch (const std::exception &) {
+            const std::lock_guard lock{placement_mutex_};
+            members_next_ = now + std::chrono::seconds{30}; // not answered: tried again soon, what was known kept
+            return clustered_;
+        }
+        const std::lock_guard lock{placement_mutex_};
+        clustered_ = clustered;
+        member_urls_ = std::move(urls);
+        member_status_ = std::move(status);
+        return clustered_;
+    }
+
+    void client::read_locations(const bool all_projects, const bool force) const {
+        const auto now = std::chrono::steady_clock::now();
+        {
+            const std::lock_guard lock{placement_mutex_};
+            if (!force && now < locations_next_) return;
+            locations_next_ = now + std::chrono::minutes{5};
+        }
+        const auto listed = metadata_of(request("GET", all_projects ? "/1.0/instances?recursion=1&all-projects=true" : "/1.0/instances?recursion=1"));
+        if (!listed.is_array()) return;
+        std::map<std::string, located> found;
+        for (const auto &each: listed) {
+            auto project = text_at(each, "project");
+            if (project.empty()) project = "default";
+            found[key_of(project, text_at(each, "name"))] = {text_at(each, "location"), each};
+        }
+        const std::lock_guard lock{placement_mutex_};
+        if (all_projects) located_ = std::move(found);
+        else
+            for (auto &[key, where]: found) located_[key] = std::move(where);
+    }
+
+    std::string client::preferred(const std::string_view path) const {
+        if (path.starts_with("/1.0/operations/")) {
+            auto id = std::string{path.substr(std::string_view{"/1.0/operations/"}.size())};
+            id = id.substr(0, id.find_first_of("/?"));
+            const std::lock_guard lock{placement_mutex_};
+            const auto found = operations_.find(id);
+            return found == operations_.end() ? std::string{} : found->second;
+        }
+        const auto instance = instance_of(path);
+        if (!instance) return {};
+        if (!read_members()) return {};
+        try {
+            read_locations(true, false); // at most every 5 minutes
+        } catch (const std::exception &) {
+            // not known: the member that answered last takes it, as before
+        }
+        const std::lock_guard lock{placement_mutex_};
+        const auto where = located_.find(key_of(instance->second, instance->first));
+        if (where == located_.end()) return {};
+        const auto url = member_urls_.find(where->second.member);
+        return url == member_urls_.end() ? std::string{} : url->second;
+    }
+
+    std::vector<instance> client::cluster_instances(const bool all_projects, std::vector<member_health> &health) const {
+        // The names (from the database: no member forwards this), then where each is when one's new.
+        const auto names = metadata_of(request("GET", all_projects ? "/1.0/instances?all-projects=true" : "/1.0/instances"));
+        std::vector<std::string> keys;
+        if (names.is_array())
+            for (const auto &url: names)
+                if (url.is_string())
+                    if (const auto found = instance_of(url.get<std::string>())) keys.push_back(key_of(found->second, found->first));
+        bool unknown = false;
+        {
+            const std::lock_guard lock{placement_mutex_};
+            unknown = std::ranges::any_of(keys, [&](const std::string &key) { return !located_.contains(key); });
+        }
+        read_locations(all_projects, unknown);
+
+        // By member: GET /1.0, then its instances' state, 4 at a time, the members side by side.
+        std::map<std::string, std::vector<std::pair<std::string, nlohmann::json>>> by_member; // member -> (key, listed)
+        std::map<std::string, std::string> urls, status;
+        {
+            const std::lock_guard lock{placement_mutex_};
+            for (const auto &key: keys)
+                if (const auto where = located_.find(key); where != located_.end()) by_member[where->second.member].emplace_back(key, where->second.listed);
+            urls = member_urls_;
+            status = member_status_;
+        }
+        const auto limit = std::min(timeout_, std::chrono::seconds{10});
+        struct read {
+            member_health health;
+            std::vector<std::pair<std::string, nlohmann::json>> instances; // listed, with "state" when it was read
+        };
+        std::vector<std::future<read>> reads;
+        for (auto &entry: by_member) {
+            reads.push_back(std::async(std::launch::async, [&urls, &status, &limit, this, member = entry.first, listed = std::move(entry.second)]() mutable {
+                read out;
+                out.health.name = member;
+                const auto url = urls.find(member);
+                const auto online = status.find(member);
+                if (url == urls.end() || (online != status.end() && online->second != "Online")) {
+                    out.health.error = url == urls.end() ? "no URL for it" : "it's " + online->second;
+                    out.health.states_skipped = static_cast<int>(listed.size());
+                    out.instances = std::move(listed);
+                    return out;
+                }
+                out.health.url = url->second;
+                const auto member_url = url->second;
+                // One GET on this member: its metadata, how long it took, why not.
+                struct got_one {
+                    std::optional<nlohmann::json> metadata;
+                    double ms = -1;
+                    std::string why;
+                };
+                const auto timed = [this, member_url, limit](const std::string &path) {
+                    got_one one;
+                    const auto started = std::chrono::steady_clock::now();
+                    auto got = try_on(member_url, "GET", path, nullptr, false, limit, nullptr);
+                    one.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+                    if (!got.answer) {
+                        one.why = path + ": " + got.why;
+                        return one;
+                    }
+                    try {
+                        one.metadata = metadata_of(*got.answer);
+                    } catch (const std::exception &refused) {
+                        one.why = path + ": " + refused.what();
+                    }
+                    return one;
+                };
+                const auto api = timed("/1.0");
+                if (api.metadata) out.health.api_ms = api.ms;
+                else out.health.error = api.why;
+                bool stop = !out.health.error.empty();
+                for (std::size_t at = 0; at < listed.size(); at += 4) {
+                    const auto end = std::min(listed.size(), at + 4);
+                    if (stop) {
+                        out.health.states_skipped += static_cast<int>(end - at);
+                        continue;
+                    }
+                    std::vector<std::future<got_one>> batch;
+                    for (auto i = at; i < end; ++i) {
+                        const auto &each = listed[i].second;
+                        auto project = text_at(each, "project");
+                        if (project.empty()) project = "default";
+                        const auto path = "/1.0/instances/" + encoded(text_at(each, "name")) + "/state?project=" + encoded(project);
+                        batch.push_back(std::async(std::launch::async, timed, path));
+                    }
+                    for (auto i = at; i < end; ++i) {
+                        auto one = batch[i - at].get();
+                        if (one.metadata && one.metadata->is_object()) {
+                            listed[i].second["state"] = std::move(*one.metadata);
+                            ++out.health.states_read;
+                            out.health.state_max_ms = std::max(out.health.state_max_ms, one.ms);
+                        } else {
+                            ++out.health.states_skipped;
+                            if (out.health.error.empty()) out.health.error = one.why.empty() ? "no state in its answer" : one.why;
+                            stop = true; // the rest of this member's left for the next listing
+                        }
+                    }
+                }
+                out.instances = std::move(listed);
+                return out;
+            }));
+        }
+        std::map<std::string, instance> made;
+        for (auto &future: reads) {
+            auto got = future.get();
+            for (auto &[key, listed]: got.instances) {
+                auto one = instance::from_json(listed);
+                one.state_read = listed.contains("state") && listed["state"].is_object();
+                if (one.project.empty()) one.project = "default";
+                made[key] = std::move(one);
+            }
+            health.push_back(std::move(got.health));
+        }
+        // In the names' order; one listed but not yet located (made meanwhile) comes as the names say.
+        std::vector<instance> out;
+        out.reserve(keys.size());
+        for (const auto &key: keys)
+            if (auto found = made.find(key); found != made.end()) out.push_back(std::move(found->second));
+        return out;
     }
 
     nlohmann::json client::metadata_of(const response &answer) {
@@ -375,17 +613,7 @@ namespace sc::lxd {
         return metadata_of(request("GET", path));
     }
 
-    std::vector<instance> client::instances(const bool all_projects) const {
-        if (standalone_.empty()) {
-            const auto listed = get(all_projects ? "/1.0/instances?recursion=2&all-projects=true" : "/1.0/instances?recursion=2");
-            std::vector<instance> out;
-            if (!listed.is_array()) return out;
-            out.reserve(listed.size());
-            for (const auto &each: listed) out.push_back(instance::from_json(each));
-            return out;
-        }
-        return list(all_projects).instances;
-    }
+    std::vector<instance> client::instances(const bool all_projects) const { return list(all_projects).instances; }
 
     std::optional<instance> client::find(const std::string_view name, const std::string_view project) const {
         if (const auto *other = route(name, project)) {

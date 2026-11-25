@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -239,6 +240,55 @@ int main() {
         CHECK_EQ(lxd.get("/1.0/instances/web1")["devices"]["logs"].value("path", ""), std::string{"/var/logs"});
         CHECK(lxd.get("/1.0/instances/web1")["devices"].contains("eth0"));
         CHECK_THROWS_AS((void) lxd.remove_device("none", "data"), sc::lxd::error);
+    }
+
+    SECTION("A cluster: an instance's calls and their operations go to its own member, the rest to the one that answered last");
+    {
+        // The members are known by another name (localhost) than the cluster gives (127.0.0.1), so the Host
+        // the stand-in was asked as says which way a call went.
+        const std::string alias = "https://localhost:" + std::to_string(port);
+        const std::string own = "127.0.0.1:" + std::to_string(port), other = "localhost:" + std::to_string(port);
+        const sc::lxd::client lxd{{alias}, known, std::chrono::seconds{5}};
+        const auto host_of = [&](const std::string &path) { return lxd.get("/1.0/test/host?path=" + path).get<std::string>(); };
+        CHECK(lxd.find("web1").has_value());
+        CHECK_EQ(host_of("/1.0/instances/web1"), own);
+        CHECK_EQ(lxd.exec("web1", {"true"}).status, 0);
+        CHECK_EQ(host_of("/1.0/instances/web1/exec"), own);
+        CHECK_EQ(host_of("/1.0/test/host"), other); // any path but an instance's
+        CHECK_EQ(host_of("/1.0/cluster/members"), other);
+    }
+
+    SECTION("A cluster's listing: names, then each instance's state on its own member; how each member answered");
+    {
+        const sc::lxd::client lxd{{dead, live}, known, std::chrono::seconds{5}};
+        const auto listed = lxd.list();
+        CHECK_EQ(listed.instances.size(), std::size_t{2});
+        CHECK_EQ(listed.members.size(), std::size_t{2}); // hv2 and ta
+        for (const auto &each: listed.instances) CHECK(each.state_read);
+        const auto web = std::ranges::find_if(listed.instances, [](const auto &each) { return each.name == "web1"; });
+        CHECK(web != listed.instances.end() && web->ipv4.size() == 2 && web->memory_usage && web->location == "hv2");
+        for (const auto &member: listed.members) {
+            CHECK_MSG(member.error.empty(), member.name + ": " + member.error);
+            CHECK(member.api_ms >= 0);
+            CHECK_EQ(member.states_read, 1);
+            CHECK_EQ(member.states_skipped, 0);
+            CHECK(member.state_max_ms >= 0);
+        }
+    }
+
+    SECTION("A read that times out isn't asked of the other members");
+    {
+        const sc::lxd::client lxd{{live, live}, known, std::chrono::seconds{1}};
+        const auto before = lxd.get("/1.0/test/hits?path=/1.0/test/slow").get<int>();
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            (void) lxd.get("/1.0/test/slow");
+            CHECK_MSG(false, "a read past its limit didn't throw");
+        } catch (const sc::lxd::unreachable &slow) {
+            CHECK_MSG(std::string{slow.what()}.find("not asked of the other members") != std::string::npos, slow.what());
+        }
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds{2500});
+        CHECK_EQ(lxd.get("/1.0/test/hits?path=/1.0/test/slow").get<int>(), before + 1);
     }
 
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");
