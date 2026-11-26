@@ -193,6 +193,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.ok(hits.get(query.get("path", [""])[0], 0))
         if url.path == "/1.0/test/host":
             return self.ok(hosts.get(query.get("path", [""])[0], ""))
+        if url.path == "/1.0/test/pause":  # a short call (pacing's tests)
+            time.sleep(0.3)
+            return self.ok(1)
         if url.path == "/1.0/test/slow":
             # Answers after 3 s: past a short limit, a read that timed out.
             time.sleep(3)

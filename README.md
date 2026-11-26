@@ -97,6 +97,20 @@ lxd.exec("mail3", {"postqueue", "-p"}); // to hv3
 const auto all = lxd.list();            // all.unanswered: standalone hosts that didn't answer
 ```
 
+Calls can be paced (since 6.1.0), for the whole process and every client, by member URL:
+
+```cpp
+sc::lxd::set_pacing({.in_flight = 2,            // at most two calls under way on a member
+                     .listing_gap = 2s,         // instance listings (GET /1.0/instances) that far apart
+                     .slow = 3s,                // an answer slower than this: the member backs off
+                     .max_backoff = 30s,        // for as long as it took, at most this
+                     .max_wait = 60s});         // a call that waited this long goes ahead anyway
+for (const auto &member: sc::lxd::member_queues()) // in flight, waiting, calls, waited, backoffs, overdue
+    std::cout << member.url << " " << member.waiting << "\n";
+```
+
+Waits for an operation (`/1.0/operations/<id>/wait`) aren't paced. `in_flight` 0, the default, paces nothing.
+
 A TLS client on LXD 5.21 can't be made read only (`--restricted --projects` only limits projects),
 so the key is as powerful as root on the cluster: keep it on the hosts that use it, mode 600.
 

@@ -5,11 +5,93 @@
 #include <cctype>
 #include <cstdio>
 #include <algorithm>
+#include <condition_variable>
 #include <future>
 #include <utility>
 
 namespace sc::lxd {
     namespace {
+        // Pacing (set_pacing): one gate per member URL, for the whole process.
+        using steady = std::chrono::steady_clock;
+        struct gate {
+            int in_flight = 0, waiting = 0;
+            steady::time_point resume_at{}, next_listing{};
+            member_queue figures;
+        };
+        std::mutex pace_mutex;
+        std::condition_variable pace_changed;
+        pacing pace;
+        std::map<std::string, gate> gates;
+
+        bool paced(const std::string_view method, const std::string_view path) {
+            if (pace.in_flight <= 0) return false;
+            const auto bare = path.substr(0, path.find('?'));
+            return !(method == "GET" && bare.starts_with("/1.0/operations/") && bare.ends_with("/wait"));
+        }
+        bool is_listing(const std::string_view method, const std::string_view path) {
+            return method == "GET" && path.substr(0, path.find('?')) == "/1.0/instances";
+        }
+
+        // Held while a paced call is under way on a member: waits for its turn, and when done
+        // notes how long it took (a slow one makes the member back off).
+        class turn {
+        public:
+            turn(const std::string &url, const std::string_view method, const std::string_view path) {
+                std::unique_lock lock{pace_mutex};
+                if (!paced(method, path)) return;
+                url_ = url;
+                auto &at = gates[url];
+                at.figures.url = url;
+                const bool lists = is_listing(method, path);
+                const auto asked = steady::now();
+                const auto deadline = asked + pace.max_wait;
+                bool waited = false;
+                ++at.waiting;
+                for (;;) {
+                    const auto now = steady::now();
+                    auto ready_at = std::max(at.resume_at, lists ? at.next_listing : steady::time_point{});
+                    if (at.in_flight < pace.in_flight && now >= ready_at) break;
+                    if (now >= deadline) {
+                        ++at.figures.overdue;
+                        break;
+                    }
+                    waited = true;
+                    // a free slot is told (notify); the times are waited out
+                    pace_changed.wait_until(lock, std::min(deadline, now < ready_at ? ready_at : deadline));
+                }
+                --at.waiting;
+                ++at.in_flight;
+                ++at.figures.calls;
+                if (waited) {
+                    ++at.figures.waited;
+                    at.figures.waited_seconds += std::chrono::duration<double>(steady::now() - asked).count();
+                }
+                if (lists) at.next_listing = steady::now() + pace.listing_gap;
+                started_ = steady::now();
+            }
+            ~turn() {
+                if (url_.empty()) return;
+                {
+                    const std::lock_guard lock{pace_mutex};
+                    auto &at = gates[url_];
+                    --at.in_flight;
+                    const auto took = steady::now() - started_;
+                    at.figures.last_seconds = std::chrono::duration<double>(took).count();
+                    if (took > pace.slow) {
+                        ++at.figures.backoffs;
+                        const auto pause = std::min<steady::duration>(took, pace.max_backoff);
+                        at.resume_at = std::max(at.resume_at, steady::now() + pause);
+                    }
+                }
+                pace_changed.notify_all();
+            }
+            turn(const turn &) = delete;
+            turn &operator=(const turn &) = delete;
+
+        private:
+            std::string url_; // empty: not paced
+            steady::time_point started_{};
+        };
         // A path segment or query value, %XX-encoded but for unreserved characters.
         std::string encoded(const std::string_view text) {
             static constexpr char hex[] = "0123456789ABCDEF";
@@ -274,8 +356,35 @@ namespace sc::lxd {
         return out;
     }
 
+    void set_pacing(const pacing &how) {
+        {
+            const std::lock_guard lock{pace_mutex};
+            pace = how;
+        }
+        pace_changed.notify_all();
+    }
+
+    pacing current_pacing() {
+        const std::lock_guard lock{pace_mutex};
+        return pace;
+    }
+
+    std::vector<member_queue> member_queues() {
+        const std::lock_guard lock{pace_mutex};
+        std::vector<member_queue> out;
+        for (const auto &[url, at]: gates) {
+            auto one = at.figures;
+            one.url = url;
+            one.in_flight = at.in_flight;
+            one.waiting = at.waiting;
+            out.push_back(std::move(one));
+        }
+        return out;
+    }
+
     client::attempt client::try_on(const std::string &url, const char *method, const std::string_view path, const std::string *body, const bool raw,
                                    const std::chrono::seconds limit, const std::map<std::string, std::string> *headers) const {
+        const turn mine{url, method, path}; // its turn on this member (set_pacing)
         attempt out;
         sc::http::client call{url + std::string{path}};
         call.quiet().client_certificate(credentials_.certificate.string(), credentials_.key.string());

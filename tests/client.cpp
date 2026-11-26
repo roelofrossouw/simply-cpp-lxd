@@ -12,6 +12,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -289,6 +290,60 @@ int main() {
         }
         CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds{2500});
         CHECK_EQ(lxd.get("/1.0/test/hits?path=/1.0/test/slow").get<int>(), before + 1);
+    }
+
+    SECTION("Pacing: calls one at a time on a member, a slow answer backs off, a gap between listings, max_wait");
+    {
+        using namespace std::chrono_literals;
+        const sc::lxd::client lxd{{live}, known, std::chrono::seconds{5}};
+        const auto figures = [&] {
+            for (const auto &each: sc::lxd::member_queues())
+                if (each.url == live) return each;
+            return sc::lxd::member_queue{};
+        };
+        // Three 0.3 s calls at once, one at a time, each slow enough (> 0.2 s) to back off 0.3 s: ~1.5 s
+        sc::lxd::set_pacing({.in_flight = 1, .listing_gap = 400ms, .slow = 200ms, .max_backoff = 500ms, .max_wait = 10s});
+        const auto before = figures();
+        auto started = std::chrono::steady_clock::now();
+        {
+            std::vector<std::thread> calls;
+            for (int i = 0; i < 3; ++i) calls.emplace_back([&] { (void) lxd.get("/1.0/test/pause"); });
+            for (auto &each: calls) each.join();
+        }
+        CHECK(std::chrono::steady_clock::now() - started >= 1300ms);
+        const auto after = figures();
+        CHECK_EQ(after.calls - before.calls, std::uint64_t{3});
+        CHECK(after.waited - before.waited >= 2);
+        CHECK(after.backoffs - before.backoffs >= 3);
+        CHECK_EQ(after.in_flight, 0);
+        CHECK_EQ(after.waiting, 0);
+        CHECK(after.last_seconds >= 0.25);
+
+        // Listings: listing_gap apart; other calls not held up by it
+        sc::lxd::set_pacing({.in_flight = 4, .listing_gap = 400ms, .slow = 10s, .max_backoff = 500ms, .max_wait = 10s});
+        std::this_thread::sleep_for(600ms); // the back-off above over
+        (void) lxd.get("/1.0/instances");
+        started = std::chrono::steady_clock::now();
+        (void) lxd.get("/1.0/test/hits?path=/1.0/instances");
+        CHECK(std::chrono::steady_clock::now() - started < 300ms);
+        (void) lxd.get("/1.0/instances?recursion=1");
+        CHECK(std::chrono::steady_clock::now() - started >= 300ms);
+
+        // max_wait: a call behind a long one goes ahead after it, counted as overdue
+        sc::lxd::set_pacing({.in_flight = 1, .listing_gap = 0ms, .slow = 10s, .max_backoff = 500ms, .max_wait = 200ms});
+        const auto overdue = figures().overdue;
+        std::thread holding{[&] { (void) lxd.get("/1.0/test/pause"); }};
+        std::this_thread::sleep_for(50ms);
+        started = std::chrono::steady_clock::now();
+        (void) lxd.get("/1.0/test/hits?path=/1.0/test/pause");
+        const auto waited = std::chrono::steady_clock::now() - started;
+        holding.join();
+        CHECK(waited >= 150ms);
+        CHECK(waited < 300ms);
+        CHECK_EQ(figures().overdue, overdue + 1);
+
+        sc::lxd::set_pacing({}); // off again
+        CHECK_EQ(sc::lxd::current_pacing().in_flight, 0);
     }
 
     SECTION("Nobody answering, a certificate the server doesn't know, a server not trusted");

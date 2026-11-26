@@ -157,6 +157,36 @@ namespace sc::lxd {
         std::string error;        // why the first that failed did ("" none)
     };
 
+    // How calls to each member are paced (since 6.1.0): process-wide, by member URL, for every client.
+    // A call waits until fewer than in_flight are under way on that member, the member isn't backing
+    // off, and (an instance listing: GET /1.0/instances, any query) listing_gap has passed since its
+    // last listing. An answer slower than slow makes the member back off: no new call starts on it for
+    // as long as that answer took, at most max_backoff. A call that waited max_wait goes ahead anyway.
+    // Waits for an operation (/wait) aren't paced: they're long by design. in_flight 0: no pacing (the
+    // default, as before 6.1.0).
+    struct pacing {
+        int in_flight = 0;
+        std::chrono::milliseconds listing_gap{2000};
+        std::chrono::milliseconds slow{3000};
+        std::chrono::milliseconds max_backoff{30000};
+        std::chrono::milliseconds max_wait{60000};
+    };
+    void set_pacing(const pacing &how);
+    [[nodiscard]] pacing current_pacing();
+
+    // A member's queue as it stands, and its figures since the start (since 6.1.0).
+    struct member_queue {
+        std::string url;
+        int in_flight = 0, waiting = 0;
+        std::uint64_t calls = 0;        // paced calls started
+        std::uint64_t waited = 0;       // of them, how many had to wait
+        double waited_seconds = 0;      // their waiting, all told
+        std::uint64_t backoffs = 0;     // slow answers that made it back off
+        std::uint64_t overdue = 0;      // calls that went ahead after max_wait
+        double last_seconds = -1;       // the last answer's time
+    };
+    [[nodiscard]] std::vector<member_queue> member_queues();
+
     // What list() found (since 4.0.0).
     struct listing {
         std::vector<instance> instances;
