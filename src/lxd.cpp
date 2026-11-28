@@ -495,6 +495,9 @@ namespace sc::lxd {
             return clustered_;
         }
         const std::lock_guard lock{placement_mutex_};
+        // A member that isn't Online (evacuated, offline, rebooting) is read again in 30 s, so it's taken back soon
+        // after it's restored (6.1.1: hv stayed skipped as Evacuated for 8 minutes after lxd-host-restore)
+        if (std::ranges::any_of(status, [](const auto &each) { return each.second != "Online"; })) members_next_ = now + std::chrono::seconds{30};
         clustered_ = clustered;
         member_urls_ = std::move(urls);
         member_status_ = std::move(status);

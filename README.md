@@ -11,7 +11,8 @@ client certificate.
 - **Calls go where the work is** (since 6.0.0). A call about an instance (its state, files, `exec()`,
   config, devices) and its operations go to the member that has it, so no member forwards them to
   another; a member that kept forwarding cluster-wide listings to a slow one clogged that one's
-  database for hours. The members (`/1.0/cluster/members`) are read every 10 minutes, the instances'
+  database for hours. The members (`/1.0/cluster/members`) are read every 10 minutes (every 30 s
+  while one isn't Online: an evacuated member is taken back soon after it's restored), the instances'
   members (a listing without state) every 5 minutes or when one is new. `list()` takes the names (from
   the database, nothing forwarded), then reads each instance's state on its own member, the members
   side by side and 4 at a time on each; after a state read fails on a member its other instances

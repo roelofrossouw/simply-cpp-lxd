@@ -16,7 +16,8 @@
 // A cluster's calls go where the work is (since 6.0.0): a call about an instance (its state, files, exec,
 // config) and its operations go to the member that has it, so no member forwards them to another
 // (a member that kept forwarding listings to a slow one clogged that one's database for hours,
-// 2026-11-24). The members (GET /1.0/cluster/members) are read every 10 minutes and the instances'
+// 2026-11-24). The members (GET /1.0/cluster/members) are read every 10 minutes (30 s while one
+// isn't Online, such as an evacuated one, so it's read again soon after it's restored) and the instances'
 // members (a listing without state) every 5 minutes or when one isn't known; any other call goes to
 // the member that answered last. A call that times out reading its answer isn't asked of the other
 // members (each would hand it to the same busy member again); one that can't connect is.
@@ -345,7 +346,7 @@ namespace sc::lxd {
                                      std::chrono::seconds limit, const std::map<std::string, std::string> *headers) const;
         // The member URL an instance's or operation's path goes to first; "" for any other path.
         [[nodiscard]] std::string preferred(std::string_view path) const;
-        // The cluster's members (name -> URL) read when 10 minutes old; false outside a cluster.
+        // The cluster's members (name -> URL) read when 10 minutes old (30 s while one isn't Online); false outside a cluster.
         bool read_members() const;
         // The instances' members and what they are (a listing without state), when 5 minutes old or force.
         void read_locations(bool all_projects, bool force) const;
